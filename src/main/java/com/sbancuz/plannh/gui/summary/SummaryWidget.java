@@ -61,11 +61,12 @@ public class SummaryWidget extends ParentWidget<SummaryWidget> implements IDragg
             .crossAxisAlignment(Alignment.CrossAxis.START)
             .scrollDirection(new VerticalScrollData())
             .setEnabledIf(_ -> !data.isSummaryFold(Summary.Section.ALL))
-            .maxSize(
-                () -> Math.max(
-                    MIN_VIEWPORT_H,
-                    this.canvas.getArea().height / this.canvas.getGraph()
-                        .getZoom() - PANEL_CHROME));
+            // The HUD is screen-fixed, not on the zoomed canvas: cap it at the canvas space below its
+            // top edge, in plain screen pixels, so taller content scrolls instead of running offscreen
+            .maxSize(() -> {
+                final Area a = this.canvas.getArea();
+                return Math.max(MIN_VIEWPORT_H, a.ry + a.height - data.getY() - PANEL_CHROME);
+            });
 
         sectionsList.onMove(children -> {
             final int[] order = new int[children.size()];
