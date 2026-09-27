@@ -14,6 +14,7 @@ import com.sbancuz.plannh.data.properties.PropertyProvider;
 import com.sbancuz.plannh.data.properties.RecipeProperty;
 import com.sbancuz.plannh.data.provider.DefaultProvider;
 
+import codechicken.nei.recipe.GuiRecipeTab;
 import codechicken.nei.recipe.IRecipeHandler;
 import codechicken.nei.recipe.Recipe;
 import codechicken.nei.recipe.RecipeHandlerRef;
@@ -148,6 +149,21 @@ public class Node {
             if (p.canCraft(handler, recipeIndex)) return p;
         }
         return availableExtractors.getFirst();
+    }
+
+    /**
+     * The NEI handler this node's recipe came from, as its registered handler name: what makes two
+     * nodes the same machine type. Read off the handler rather than off {@code RecipeId}, whose getter
+     * for the same string is spelled differently across NEI versions, so this holds for the version the
+     * mod builds against and the one the pack ships. The empty string when the handler is gone, which
+     * groups a chart's unresolvable nodes together and is as good an answer as any.
+     */
+    public String handlerName() {
+        if (recipeId == null) return "";
+        final IRecipeHandler handler = RecipeHandlerRef.of(recipeId).handler;
+        if (handler == null) return "";
+        return GuiRecipeTab.getHandlerInfo(handler)
+            .getHandlerName();
     }
 
     public int getRecipeDuration() {
