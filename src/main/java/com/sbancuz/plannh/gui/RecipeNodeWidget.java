@@ -29,8 +29,10 @@ import com.sbancuz.plannh.data.MachineConfig;
 import com.sbancuz.plannh.data.MachineProfile;
 import com.sbancuz.plannh.data.RecipeContext;
 import com.sbancuz.plannh.data.SettingDef;
+import com.sbancuz.plannh.data.channels.ChannelReport;
 import com.sbancuz.plannh.data.flowchart.Group;
 import com.sbancuz.plannh.data.flowchart.Node;
+import com.sbancuz.plannh.data.flowchart.Plan;
 import com.sbancuz.plannh.data.flowchart.Port;
 import com.sbancuz.plannh.data.flowchart.balancer.BalanceResult;
 import com.sbancuz.plannh.data.flowchart.balancer.Balancer;
@@ -99,6 +101,11 @@ public class RecipeNodeWidget extends Widget<RecipeNodeWidget>
     private static final int ICON_Y = 14;
     private static final int SIMPLE_GROUP_LABEL_Y = 16;
     private static final int GROUP_BAR_W = 4;
+
+    // Circuit-channel badge (a tab on the node's top edge)
+    private static final int CHANNEL_CHIP = 7;
+    private static final int CHANNEL_TAB_PAD = 2;
+    private static final int CHANNEL_TAB_H = CHANNEL_CHIP + 2 * CHANNEL_TAB_PAD;
 
     // Throughput / IO list
     private static final int LEFT_CONTENT_X = 8;
@@ -321,6 +328,7 @@ public class RecipeNodeWidget extends Widget<RecipeNodeWidget>
             if (node.machineConfig.hasAnyBoost()) {
                 GuiDraw.drawText(buildConfigBadge(), LEFT_CONTENT_X, TITLE_TEXT_Y, 1.0f, PlannhColors.TEXT_BADGE.getColor(), false);
             }
+            drawChannelBadge(CONTENT_INSET, -TEXTURE_OFF);
 
             final Group grp = canvas.getGroupForNode(node.id);
             if (grp != null) {
@@ -396,6 +404,7 @@ public class RecipeNodeWidget extends Widget<RecipeNodeWidget>
                 final int is = ICON_SIZE;
                 GuiDraw.drawItem(primary, w - is - ICON_RMARGIN, ICON_Y, is, is, context.getCurrentDrawingZ());
             }
+            drawChannelBadge(0, 0);
 
             final Group grp2 = canvas.getGroupForNode(node.id);
             if (grp2 != null) {
@@ -434,6 +443,38 @@ public class RecipeNodeWidget extends Widget<RecipeNodeWidget>
             if (mx >= 0 && mx < PORT_SIZE && my >= py && my < py + PORT_SIZE) return i;
         }
         return -1;
+    }
+
+    /**
+     * The node's circuit-channel badge from the summary's analysis, as a tab sitting on the node's top
+     * edge at {@code x} (the edge being {@code top}): a chip in its bus/hatch color and its channel
+     * (and check order) tag. Outside the title bar, so it never covers the machine name. Draws nothing
+     * when the analysis is off or has no place for this node.
+     */
+    private void drawChannelBadge(final int x, final int top) {
+        final ChannelReport.Badge badge = Plan.getInstance()
+            .getSummary()
+            .channelBadge(node.id);
+        if (badge == null) return;
+        final String tag = badge.tag();
+        final int textW = tag.isEmpty() ? 0
+            : Minecraft.getMinecraft().fontRenderer.getStringWidth(tag) + CHANNEL_TAB_PAD;
+        final int w = CHANNEL_TAB_PAD * 2 + CHANNEL_CHIP + textW;
+        final int y = top - CHANNEL_TAB_H;
+        GuiDraw.drawRect(x, y, w, CHANNEL_TAB_H, PlannhColors.NODE_BG.getColor());
+        GuiHelper.drawRectBorder(x, y, w, CHANNEL_TAB_H, 1, PlannhColors.NODE_BORDER.getColor());
+        final int cx = x + CHANNEL_TAB_PAD;
+        final int cy = y + CHANNEL_TAB_PAD;
+        GuiDraw.drawRect(cx, cy, CHANNEL_CHIP, CHANNEL_CHIP, DyeColors.argb(badge.dye()));
+        if (!tag.isEmpty()) {
+            GuiDraw.drawText(
+                tag,
+                cx + CHANNEL_CHIP + CHANNEL_TAB_PAD,
+                cy,
+                1.0f,
+                PlannhColors.TEXT_BADGE.getColor(),
+                false);
+        }
     }
 
     private void drawGroupMembershipBar() {
