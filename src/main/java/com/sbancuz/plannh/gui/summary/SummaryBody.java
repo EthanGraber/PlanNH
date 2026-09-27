@@ -47,8 +47,8 @@ class SummaryBody extends SummaryFlow {
         super.onUpdate();
         final Summary.Mode mode = data.computedMode();
         final Summary.RateUnit unit = data.getRateUnit();
-        if (rowsBuiltAt != data.calculatedAt() || rowsMode != mode || rowsUnit != unit) {
-            rowsBuiltAt = data.calculatedAt();
+        if (rowsBuiltAt != data.linesVersion() || rowsMode != mode || rowsUnit != unit) {
+            rowsBuiltAt = data.linesVersion();
             rowsMode = mode;
             rowsUnit = unit;
             rebuildRows(null);
@@ -79,6 +79,9 @@ class SummaryBody extends SummaryFlow {
                 PlannhColors.SUMMARY_TEXT_MUTED.getColor());
             case Line.Choice choice -> new ChoiceRow(choice);
             case Line.Totals totals -> new TotalsRow(totals, rowsMode);
+            case Line.ChannelMachine machine -> ChannelRows.machine(machine);
+            case Line.ChannelGroup group -> ChannelRows.group(group);
+            case Line.ChannelNotes notes -> ChannelRows.notes(notes);
         };
     }
 
