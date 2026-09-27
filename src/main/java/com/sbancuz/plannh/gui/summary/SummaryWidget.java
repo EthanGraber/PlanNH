@@ -37,14 +37,13 @@ public class SummaryWidget extends ParentWidget<SummaryWidget> implements IDragg
     private static final int BUTTON_GAP = 2;
     private static final int SCROLLBAR_GAP = 4;
     private static final int MIN_VIEWPORT_H = 45;
-    /** Title row, separator and padding: a first-frame guess until the panel has been laid out. */
     private static final int PANEL_CHROME = SummaryHeader.HEADER_H + 1 + SECTION_GAP * 4;
 
     protected final CanvasWidget canvas;
     protected final Summary data;
 
     private Graph lastGraph;
-    private FlowchartList sectionsList;
+    private final FlowchartList sectionsList;
     private boolean moving = false;
     private int dragStartMouseX, dragStartMouseY;
     private int dragStartX, dragStartY;
@@ -62,11 +61,9 @@ public class SummaryWidget extends ParentWidget<SummaryWidget> implements IDragg
             .crossAxisAlignment(Alignment.CrossAxis.START)
             .scrollDirection(new VerticalScrollData())
             .setEnabledIf(_ -> !data.isSummaryFold(Summary.Section.ALL))
-            // The HUD is screen-fixed, not on the zoomed canvas: cap it at the canvas space below its
-            // top edge, in plain screen pixels, so taller content scrolls instead of running offscreen
             .maxSize(() -> {
                 final Area a = this.canvas.getArea();
-                return Math.max(MIN_VIEWPORT_H, a.ry + a.height - data.getY() - chrome());
+                return Math.max(MIN_VIEWPORT_H, a.ry + a.height - data.getY() - minHeight());
             });
 
         sectionsList.onMove(children -> {
@@ -152,11 +149,7 @@ public class SummaryWidget extends ParentWidget<SummaryWidget> implements IDragg
             .stateOverlay(Summary.Mode.THROUGHPUT, IKey.lang("plannh.summary.mode.throughput.short"));
     }
 
-    /**
-     * Everything in the panel but the section list, as laid out, so a capped panel ends exactly at the
-     * canvas bottom (where a drop snaps it back to).
-     */
-    private int chrome() {
+    private int minHeight() {
         final int list = sectionsList.getArea().height;
         final int panel = getArea().height;
         return list > 0 && panel > list ? panel - list : PANEL_CHROME;
