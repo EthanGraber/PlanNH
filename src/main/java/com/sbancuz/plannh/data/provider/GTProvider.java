@@ -19,6 +19,7 @@ import com.sbancuz.plannh.data.RecipeContext;
 import com.sbancuz.plannh.data.RecipeHandlerAccess;
 import com.sbancuz.plannh.data.SettingDef;
 import com.sbancuz.plannh.data.Settings;
+import com.sbancuz.plannh.data.channels.ChannelReport;
 import com.sbancuz.plannh.data.effect.Effects;
 import com.sbancuz.plannh.data.effect.steps.GTOverclockStep;
 import com.sbancuz.plannh.data.flowchart.Node;
@@ -90,6 +91,7 @@ public class GTProvider implements PropertyProvider {
 
         MachineProfileRegistry.register(PROFILE);
         new GTSteamProvider().register();
+        ChannelReport.setAnalyzer(GTChannelAnalyzer::analyze);
     }
 
     static BiPredicate<RecipeContext, Map<String, Object>> multiblockOnly() {
