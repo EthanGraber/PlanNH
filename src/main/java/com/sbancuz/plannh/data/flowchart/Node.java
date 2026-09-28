@@ -152,11 +152,9 @@ public class Node {
     }
 
     /**
-     * The NEI handler this node's recipe came from, as its registered handler name: what makes two
-     * nodes the same machine type. Read off the handler rather than off {@code RecipeId}, whose getter
-     * for the same string is spelled differently across NEI versions, so this holds for the version the
-     * mod builds against and the one the pack ships. The empty string when the handler is gone, which
-     * groups a chart's unresolvable nodes together and is as good an answer as any.
+     * The name of this node's NEI recipe handler, which makes two nodes the same machine type. Read off
+     * the handler, since {@code RecipeId}'s getter for it differs across NEI versions. Empty when the
+     * handler is gone.
      */
     public String handlerName() {
         if (recipeId == null) return "";

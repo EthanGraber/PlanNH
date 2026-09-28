@@ -1,85 +1,70 @@
 package com.sbancuz.plannh.data.channels;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.stream.IntStream;
+import java.util.function.Supplier;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import org.ojalgo.optimisation.Expression;
+import org.ojalgo.optimisation.ExpressionsBasedModel;
+import org.ojalgo.optimisation.Optimisation;
+import org.ojalgo.optimisation.Variable;
+import org.ojalgo.optimisation.integer.IntegerStrategy;
+import org.ojalgo.type.context.NumberContext;
+
+import com.sbancuz.plannh.data.channels.ChannelProblem.Feed;
 import com.sbancuz.plannh.data.flowchart.balancer.Budget;
 
 /**
- * Splits a machine type's plan recipes into the fewest "channels" so that none of them can be hijacked
- * by another recipe, then uses the fewest input blocks among those splits.
+ * Splits one machine's plan recipes into the fewest channels (isolated input groups) where nothing
+ * else can run on their inputs, then picks the split with the fewest input blocks.
  * <p>
- * A channel is one isolated input group. The {@link Mode} says how the recipes inside a channel are
- * kept apart, which follows GT's multiblock controller (MTEMultiBlockBase#doCheckRecipe): crafting
- * input buffer slots first, then each bus color black to white as separate checks (uncolored parts
- * join every color), and within one check the machine's last recipe, then GT's lookup cache, then the
- * normal lookup.
+ * Checks follow MTEMultiBlockBase#doCheckRecipe: crafting input buffer slots, then each color black to
+ * white (uncolored parts join every color), and within one check the last recipe, GT's lookup cache,
+ * then the lookup itself. Circuitless recipes can't be given priority, so they are always checked last.
  * <p>
- * The ordered modes decide a channel's check order per catalyst set: recipes with the same catalysts
- * are found in the same check, so no order can put one before the other. A circuitless recipe can't be
- * given priority over any catalyst either: it is always checked last, so a circuitless recipe that can
- * be hijacked must get a channel of its own.
+ * Each pass is an ILP over recipe-to-channel assignments. Which recipes may share a channel is
+ * decided by {@link #checkOrder}; the ILP learns it lazily, as a cut for each rejected channel.
  */
 public final class ChannelSolver {
 
-    /** Bus/hatch colors, in the order the controller checks them. */
     public static final int COLORS = 16;
-    /** Fluids per quad input hatch; the whole block takes one color. */
+    private static final int MAX_CLIQUES = 500;
     public static final int QUAD = 4;
 
     public enum Mode {
-        /**
-         * No hijack may exist inside a channel. A channel is its own machine, its own fully colored
-         * bus+hatch group, or its own crafting input buffer; several fit in one machine as colors.
-         */
+        /** Nothing else may run in a channel, relies on no priority */
         NONE,
         /**
-         * Several circuits in one bus, checked in circuit order. A hijack of A by B is fine if A's
-         * catalysts are checked first, except when B is itself a plan recipe in the channel (the
-         * controller retries its last recipe before that order) or A is circuitless.
+         * Allow reliance on circuit priority
          */
         CIRCUIT,
         /**
-         * A colored bus per catalyst set, fluids through shared uncolored hatches, checked black first.
-         * Only hijacks that run on the victim's fluids cross colors. Uncolored hatches reach every
-         * color, so a channel here is a whole machine (the panel calls it one), holding up to 16
-         * colors. Circuitless recipes still come last.
+         * Use colored buses for prioritization, share uncolored hatches. Allows for some hatch optimization.
          */
         COLOR
     }
 
     /**
-     * How long a solve may search, in the balancer's terms: a wall-clock {@link Budget} shared by both
-     * passes, and a cap on the search nodes of each so a result doesn't hinge on machine speed where
-     * it matters. The channel count is proven minimal when pass 1 finishes, the block count when pass 2
-     * does; when either stops early the best split found so far stands and the {@link Solution} says
-     * so.
-     *
-     * @param millis       wall-clock ceiling on the whole solve
-     * @param nodesPerPass search nodes each pass may visit
+     * @param millis        wall-clock ceiling on the whole solve, shared by every pass
+     * @param nodesPerSolve branch-and-bound nodes each ILP solve may use
      */
-    public record Limits(long millis, int nodesPerPass) {
+    public record Limits(long millis, int nodesPerSolve) {
 
-        /**
-         * The summary re-derives its rows on the client thread, so a solve gets a fraction of what the
-         * balancer's alternatives search is allowed ({@code Numerics#altBudgetMillis}). Realistic
-         * charts finish in well under a millisecond.
-         */
-        public static final Limits DEFAULT = new Limits(150, 200_000);
+        public static final Limits DEFAULT = new Limits(150, 20_000);
     }
 
-    /** Input blocks a channel needs; outputs, energy and maintenance aren't counted. */
     public record Parts(int buses, int quad, int normal) {
 
         public static final Parts ZERO = new Parts(0, 0, 0);
@@ -95,23 +80,21 @@ public final class ChannelSolver {
 
     /**
      * @param members    recipe indices in check order
-     * @param checkOrder the channel's catalyst sets, checked first to last (in {@link Mode#COLOR} the
-     *                   n-th set takes the n-th color)
+     * @param checkOrder catalyst sets, first to last; in {@link Mode#COLOR} the n-th takes the n-th color
      */
-    public record Channel(@Nonnull List<Integer> members, @Nonnull List<Set<String>> checkOrder,
+    public record Channel(@Nonnull List<Integer> members, @Nonnull List<Set<Ingredient.Item>> checkOrder,
         @Nonnull Parts parts) {}
 
     /**
-     * @param machines        machines needed for these channels, for conflicts alone
-     * @param channelsMinimal the channel count is proven minimal (pass 1 finished within its limits)
-     * @param blocksMinimal   the block count is proven minimal for that channel count (pass 2 finished)
+     * @param channelsMinimal the channel count is proven minimal
+     * @param blocksMinimal   the block count is proven minimal for that channel count
      */
     public record Solution(@Nonnull Mode mode, @Nonnull List<Channel> channels, int machines, @Nonnull Parts total,
         boolean channelsMinimal, boolean blocksMinimal) {}
 
     private ChannelSolver() {}
 
-    /** (quad, normal) hatches that hold {@code fluids} distinct fluids in the fewest blocks. */
+    /** (quad, normal) hatches holding {@code fluids} distinct fluids in the fewest blocks. */
     public static int[] fluidHatches(final int fluids) {
         final int quad = fluids / QUAD;
         final int rest = fluids % QUAD;
@@ -120,105 +103,189 @@ public final class ChannelSolver {
     }
 
     /**
-     * Blocks needed, assuming one batch in the machine at a time: hatches are sized for the recipe with
-     * the most fluids. {@link Mode#COLOR} needs a bus per catalyst set, plus one for circuitless
-     * recipes with items.
+     * Hatches are sized for the recipe with the most fluids. {@link Mode#COLOR} needs a bus per
+     * catalyst set, plus one for circuitless recipes with items.
      */
-    public static Parts parts(final ChannelProblem p, final List<Integer> members, final Mode mode) {
+    public static Parts parts(final ChannelProblem p, final Collection<Integer> members, final Mode mode) {
         int fluids = 0;
-        boolean bus = false;
-        boolean circuitlessBus = false;
-        final Set<Set<String>> sets = new HashSet<>();
+        final Set<Object> buses = new HashSet<>();
         for (final int i : members) {
-            final ChannelProblem.Recipe r = p.recipes()
-                .get(i);
-            fluids = Math.max(fluids, r.fluidInputs());
-            bus |= r.needsBus();
-            if (r.catalysts()
-                .isEmpty()) circuitlessBus |= r.needsBus();
-            else sets.add(r.catalysts());
+            fluids = Math.max(
+                fluids,
+                p.recipes()
+                    .get(i)
+                    .fluidInputs());
+            final Object bus = busKey(p, i, mode);
+            if (bus != null) buses.add(bus);
         }
         final int[] hatches = fluidHatches(fluids);
-        final int buses = mode == Mode.COLOR ? sets.size() + (circuitlessBus ? 1 : 0) : bus ? 1 : 0;
-        return new Parts(buses, hatches[0], hatches[1]);
+        return new Parts(buses.size(), hatches[0], hatches[1]);
+    }
+
+    /** Recipes with equal keys share a bus; null when the recipe needs none. */
+    @Nullable
+    private static Object busKey(final ChannelProblem p, final int i, final Mode mode) {
+        final ChannelProblem.Recipe r = p.recipes()
+            .get(i);
+        if (!r.needsBus()) return null;
+        return mode == Mode.COLOR ? r.catalysts() : Boolean.TRUE;
+    }
+
+    /** The channel's catalyst sets in check order, or null if the recipes can't share it. */
+    @Nullable
+    public static List<Set<Ingredient.Item>> checkOrder(final ChannelProblem p, final Collection<Integer> members,
+        final Mode mode) {
+        return judge(p, members, mode).order();
     }
 
     /**
-     * Check order of the channel's catalyst sets, first to last, or null if the recipes can't share a
-     * channel in this mode. Each hijack of A by B that can happen needs A's catalysts checked before
-     * B's.
+     * @param order null when the channel is invalid
+     * @param fixes for an invalid channel, one set per problem: the recipes whose joining would lift
+     *              it. An empty set means nothing can. Adding recipes never lifts a problem otherwise,
+     *              which is what makes the solver's cuts sound.
      */
-    @Nullable
-    public static List<Set<String>> checkOrder(final ChannelProblem p, final List<Integer> members, final Mode mode) {
-        final Comparator<Set<String>> order = p.catalystOrder();
-        final Set<Set<String>> setsPresent = new HashSet<>();
-        final Set<String> present = new HashSet<>();
-        for (final int i : members) {
-            final Set<String> catalysts = p.recipes()
-                .get(i)
-                .catalysts();
-            setsPresent.add(catalysts);
-            present.addAll(catalysts);
-        }
-        final List<Set<String>> sets = new ArrayList<>(setsPresent);
-        sets.sort(order);
-        if (mode == Mode.COLOR && sets.size() > COLORS) return null;
+    record Verdict(@Nullable List<Set<Ingredient.Item>> order, @Nonnull List<Set<Integer>> fixes) {
 
-        // An edge A -> B: A's catalysts must be checked before B's
-        final Map<Set<String>, Set<Set<String>>> edges = new LinkedHashMap<>();
-        for (final Set<String> s : sets) edges.put(s, new HashSet<>());
+        static final Verdict NEVER = new Verdict(null, List.of(Set.of()));
+
+        boolean valid() {
+            return order != null;
+        }
+    }
+
+    static Verdict judge(final ChannelProblem p, final Collection<Integer> members, final Mode mode) {
         final Set<Integer> memberSet = new HashSet<>(members);
+        final Set<Set<Ingredient.Item>> present = new HashSet<>();
+        for (final int i : members) present.add(
+            p.recipes()
+                .get(i)
+                .catalysts());
+        final List<Set<Ingredient.Item>> sets = new ArrayList<>(present);
+        sets.sort(p.catalystOrder());
+        if (mode == Mode.COLOR && sets.size() > COLORS) return Verdict.NEVER;
+        return p.feed() == Feed.BATCH ? batch(p, memberSet, sets, mode) : passive(p, memberSet, sets, mode);
+    }
+
+    private static Verdict batch(final ChannelProblem p, final Set<Integer> members,
+        final List<Set<Ingredient.Item>> sets, final Mode mode) {
+        final Set<Ingredient.Item> catalysts = new HashSet<>();
+        for (final Set<Ingredient.Item> s : sets) catalysts.addAll(s);
+        // An edge A -> B: A's catalysts must be checked before B's
+        final Map<Set<Ingredient.Item>, Set<Set<Ingredient.Item>>> edges = new LinkedHashMap<>();
+        for (final Set<Ingredient.Item> s : sets) edges.put(s, new HashSet<>());
+        final List<Set<Integer>> fixes = new ArrayList<>();
 
         for (final int victim : members) {
-            final Set<String> src = p.recipes()
+            final Set<Ingredient.Item> src = p.recipes()
                 .get(victim)
                 .catalysts();
             for (final ChannelProblem.Hijack h : p.hijacks()
                 .get(victim)) {
                 if (mode == Mode.COLOR) {
-                    // B runs from any bus holding its catalysts, seeing only the victim's fluids
+                    // B runs from any bus holding its catalysts, seeing only the batch's fluids
                     if (!h.fluidsOnly()) continue;
-                    for (final Set<String> s : sets) {
+                    for (final Set<Ingredient.Item> s : sets) {
                         if (s.equals(src) || !s.containsAll(h.needs())) continue;
-                        if (src.isEmpty()) return null; // circuitless is always checked last
+                        if (src.isEmpty()) return Verdict.NEVER;
                         edges.get(src)
                             .add(s);
                     }
                     continue;
                 }
-                if (!present.containsAll(h.needs())) continue;
-                if (mode == Mode.NONE) return null;
-                // CIRCUIT: B is found in the check for exactly its catalysts
-                final Set<String> dst = setsPresent.contains(h.needs()) ? h.needs() : null;
-                if (dst == null || dst.equals(src) || src.isEmpty() || memberSet.contains(h.planRecipe())) {
-                    return null;
+                if (!catalysts.containsAll(h.needs())) continue;
+                if (mode == Mode.NONE || src.isEmpty() || members.contains(h.planRecipe())) return Verdict.NEVER;
+                if (!edges.containsKey(h.needs())) {
+                    // B is found in the check for exactly its catalysts, which this channel lacks
+                    final Set<Integer> fix = withCatalysts(p, h.needs());
+                    fix.remove(h.planRecipe());
+                    if (fix.isEmpty()) return Verdict.NEVER;
+                    fixes.add(fix);
+                    continue;
                 }
                 edges.get(src)
-                    .add(dst);
+                    .add(h.needs());
             }
         }
-        final List<Set<String>> sorted = topoSort(sets, edges, order);
-        if (sorted == null || mode == Mode.NONE) return sorted;
-        // Nothing can be ordered after circuitless (such hijacks are inherent), so it goes last
-        if (sorted.remove(Set.<String>of())) sorted.add(Set.of());
-        return sorted;
+        final List<Set<Ingredient.Item>> sorted = topoSort(sets, edges, p.catalystOrder());
+        if (sorted == null) return Verdict.NEVER;
+        if (!fixes.isEmpty()) return new Verdict(null, fixes);
+        return new Verdict(mode == Mode.NONE ? sorted : circuitlessLast(sorted), List.of());
+    }
+
+    private static Verdict passive(final ChannelProblem p, final Set<Integer> members,
+        final List<Set<Ingredient.Item>> sets, final Mode mode) {
+        // Where a recipe could find its ingredients: each colored bus with the shared fluids, or the
+        // whole channel
+        final List<Set<Ingredient>> places = new ArrayList<>();
+        if (mode == Mode.COLOR) {
+            final Set<Ingredient> fluids = new HashSet<>();
+            final Map<Set<Ingredient.Item>, Set<Ingredient>> buses = new HashMap<>();
+            for (final int i : members) {
+                final ChannelProblem.Recipe r = p.recipes()
+                    .get(i);
+                final Set<Ingredient> bus = buses.computeIfAbsent(r.catalysts(), HashSet::new);
+                bus.addAll(r.catalysts());
+                for (final Ingredient in : r.inputs()) (in instanceof Ingredient.Fluid ? fluids : bus).add(in);
+            }
+            for (final Set<Ingredient> bus : buses.values()) {
+                bus.addAll(fluids);
+                places.add(bus);
+            }
+        } else {
+            final Set<Ingredient> held = new HashSet<>();
+            for (final int i : members) held.addAll(
+                p.recipes()
+                    .get(i)
+                    .held());
+            places.add(held);
+        }
+        final List<Set<Integer>> fixes = new ArrayList<>();
+        for (final ChannelProblem.Intruder x : p.intruders()) {
+            if (members.contains(x.owner())) continue;
+            for (final Set<Ingredient> place : places) {
+                if (!x.metBy(place)) continue;
+                if (x.owner() < 0) return Verdict.NEVER;
+                fixes.add(Set.of(x.owner()));
+                break;
+            }
+        }
+        if (!fixes.isEmpty()) return new Verdict(null, fixes);
+        return new Verdict(mode == Mode.NONE ? sets : circuitlessLast(new ArrayList<>(sets)), List.of());
+    }
+
+    private static Set<Integer> withCatalysts(final ChannelProblem p, final Set<Ingredient.Item> catalysts) {
+        final Set<Integer> out = new HashSet<>();
+        for (int i = 0; i < p.recipes()
+            .size(); i++) {
+            if (p.recipes()
+                .get(i)
+                .catalysts()
+                .equals(catalysts)) out.add(i);
+        }
+        return out;
+    }
+
+    private static List<Set<Ingredient.Item>> circuitlessLast(final List<Set<Ingredient.Item>> sets) {
+        if (sets.remove(Set.<Ingredient.Item>of())) sets.add(Set.of());
+        return sets;
     }
 
     @Nullable
-    private static List<Set<String>> topoSort(final List<Set<String>> sets,
-        final Map<Set<String>, Set<Set<String>>> edges, final Comparator<Set<String>> order) {
-        final Map<Set<String>, Integer> indegree = new HashMap<>();
-        for (final Set<String> s : sets) indegree.put(s, 0);
-        for (final Set<Set<String>> ds : edges.values())
-            for (final Set<String> d : ds) indegree.merge(d, 1, Integer::sum);
+    private static List<Set<Ingredient.Item>> topoSort(final List<Set<Ingredient.Item>> sets,
+        final Map<Set<Ingredient.Item>, Set<Set<Ingredient.Item>>> edges,
+        final Comparator<Set<Ingredient.Item>> order) {
+        final Map<Set<Ingredient.Item>, Integer> indegree = new HashMap<>();
+        for (final Set<Ingredient.Item> s : sets) indegree.put(s, 0);
+        for (final Set<Set<Ingredient.Item>> ds : edges.values())
+            for (final Set<Ingredient.Item> d : ds) indegree.merge(d, 1, Integer::sum);
 
-        final TreeSet<Set<String>> ready = new TreeSet<>(order);
-        for (final Set<String> s : sets) if (indegree.get(s) == 0) ready.add(s);
-        final List<Set<String>> out = new ArrayList<>();
+        final TreeSet<Set<Ingredient.Item>> ready = new TreeSet<>(order);
+        for (final Set<Ingredient.Item> s : sets) if (indegree.get(s) == 0) ready.add(s);
+        final List<Set<Ingredient.Item>> out = new ArrayList<>();
         while (!ready.isEmpty()) {
-            final Set<String> s = ready.pollFirst();
+            final Set<Ingredient.Item> s = ready.pollFirst();
             out.add(s);
-            for (final Set<String> d : edges.get(s)) {
+            for (final Set<Ingredient.Item> d : edges.get(s)) {
                 if (indegree.merge(d, -1, Integer::sum) == 0) ready.add(d);
             }
         }
@@ -229,10 +296,6 @@ public final class ChannelSolver {
         return solve(p, mode, Limits.DEFAULT);
     }
 
-    /**
-     * Fewest channels, then fewest input blocks, each exact unless {@code limits} run out first; see
-     * {@link Solution#channelsMinimal()} and {@link Solution#blocksMinimal()}.
-     */
     public static Solution solve(final ChannelProblem p, final Mode mode, final Limits limits) {
         return new Search(p, mode, limits).run();
     }
@@ -244,16 +307,19 @@ public final class ChannelSolver {
         private final Limits limits;
         private final Budget budget;
         private final int n;
-        private final int[] order;
-        private final Map<Set<Integer>, Boolean> validCache = new HashMap<>();
-        private final Map<Set<Integer>, Integer> blocksCache = new HashMap<>();
-        private final List<List<Integer>> channels = new ArrayList<>();
-
+        private final Map<Set<Integer>, Verdict> verdicts = new HashMap<>();
+        private final Set<Cut> cuts = new LinkedHashSet<>();
+        private final List<List<Integer>> cliques = new ArrayList<>();
+        private boolean[][] apart;
         private List<List<Integer>> best;
-        private int bestCost;
-        private int target;
-        private int nodes;
-        private boolean stopped;
+
+        private record Cut(List<Integer> together, Set<Integer> unless) {}
+
+        private enum Goal {
+            CHANNELS,
+            BLOCKS,
+            CANONICAL
+        }
 
         Search(final ChannelProblem p, final Mode mode, final Limits limits) {
             this.p = p;
@@ -262,44 +328,218 @@ public final class ChannelSolver {
             this.budget = Budget.of(limits.millis());
             this.n = p.recipes()
                 .size();
-            // Most-constrained recipes first; recipes with the same catalysts adjacent
-            final Comparator<Set<String>> sets = p.catalystOrder();
-            this.order = IntStream.range(0, n)
-                .boxed()
-                .sorted(
-                    Comparator.<Integer>comparingInt(
-                        i -> -p.hijacks()
-                            .get(i)
-                            .size())
-                        .thenComparing(
-                            i -> p.recipes()
-                                .get(i)
-                                .catalysts(),
-                            sets))
-                .mapToInt(Integer::intValue)
-                .toArray();
         }
 
         Solution run() {
             if (n == 0) return new Solution(mode, List.of(), 0, Parts.ZERO, true, true);
+            final List<Integer> all = new ArrayList<>();
+            for (int i = 0; i < n; i++) all.add(i);
+            best = firstFit(all);
+            apart = new boolean[n][n];
+            for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) {
+                final Verdict v = verdict(List.of(i, j));
+                if (v.valid()) continue;
+                addCuts(List.of(i, j), v, Set.of());
+                apart[i][j] = apart[j][i] = v.fixes()
+                    .contains(Set.of());
+            }
+            findCliques(new ArrayList<>(), all, new ArrayList<>());
+            final boolean channelsMinimal = improve(Goal.CHANNELS);
+            final boolean blocksMinimal = improve(Goal.BLOCKS);
+            if (channelsMinimal && blocksMinimal) canonicalize();
+            return solution(channelsMinimal, blocksMinimal);
+        }
 
-            // Pass 1 starts from a first-fit split, so stopping early still leaves a sound answer
-            best = firstFit();
-            startPass();
-            fewest(0);
-            final boolean channelsMinimal = !stopped;
-            target = best.size();
+        private void findCliques(final List<Integer> clique, final List<Integer> candidates,
+            final List<Integer> excluded) {
+            if (cliques.size() >= MAX_CLIQUES) return;
+            if (candidates.isEmpty() && excluded.isEmpty()) {
+                if (clique.size() > 2) cliques.add(List.copyOf(clique));
+                return;
+            }
+            final int pivot = !candidates.isEmpty() ? candidates.getFirst() : excluded.getFirst();
+            for (final int v : List.copyOf(candidates)) {
+                if (apart[pivot][v]) continue;
+                clique.add(v);
+                findCliques(clique, neighbours(candidates, v), neighbours(excluded, v));
+                clique.removeLast();
+                candidates.remove(Integer.valueOf(v));
+                excluded.add(v);
+            }
+        }
 
-            // Pass 2 is optional: it only runs on what is left of the budget
-            bestCost = cost(best);
-            startPass();
-            if (!budget.expired()) cheapest(0);
-            else stopped = true;
-            final boolean blocksMinimal = !stopped;
+        private List<Integer> neighbours(final List<Integer> of, final int v) {
+            final List<Integer> out = new ArrayList<>();
+            for (final int u : of) if (apart[u][v]) out.add(u);
+            return out;
+        }
 
+        /** Improves {@link #best}; true once it is proven optimal. */
+        private boolean improve(final Goal goal) {
+            final int k = best.size();
+            if (k == 1 || goal == Goal.BLOCKS && k == n) return true;
+            final double incumbent = goal == Goal.BLOCKS ? blocks(best) : k;
+            final List<List<Integer>> split = settle(() -> new Model(k, goal, null, -1, 0), incumbent);
+            if (split != null && better(split)) best = split;
+            return split != null;
+        }
+
+        /**
+         * Ties between splits with the same counts are common, and which one the ILP returns depends
+         * on its internals. Fixing each recipe in turn to the lowest channel any optimal split still
+         * allows picks the same split every time.
+         */
+        private void canonicalize() {
+            final int k = best.size();
+            final int cap = blocks(best);
+            List<List<Integer>> current = relabeled(best);
+            final int[] labels = labels(current);
+            for (int i = 1; i < n; i++) {
+                final int recipe = i;
+                if (labels[recipe] == lowestAllowed(labels, recipe)) continue;
+                final List<List<Integer>> split = settle(
+                    () -> new Model(k, Goal.CANONICAL, labels, recipe, cap),
+                    labels[recipe]);
+                if (split == null) return;
+                current = split;
+                // Later recipes' labels from the same split: a valid point for the next step to beat
+                System.arraycopy(labels(split), 0, labels, 0, n);
+            }
+            best = current;
+        }
+
+        /** The lowest channel no earlier recipe it can never share with is in. */
+        private int lowestAllowed(final int[] labels, final int recipe) {
+            final boolean[] taken = new boolean[n];
+            for (int j = 0; j < recipe; j++) if (apart[j][recipe]) taken[labels[j]] = true;
+            int c = 0;
+            while (taken[c]) c++;
+            return c;
+        }
+
+        /** Channels numbered by their first recipe, the one labeling the ILP allows. */
+        private static List<List<Integer>> relabeled(final List<List<Integer>> split) {
+            final List<List<Integer>> out = new ArrayList<>();
+            for (final List<Integer> c : split) {
+                final List<Integer> sorted = new ArrayList<>(c);
+                sorted.sort(Comparator.naturalOrder());
+                out.add(sorted);
+            }
+            out.sort(Comparator.comparing(List::getFirst));
+            return out;
+        }
+
+        private int[] labels(final List<List<Integer>> split) {
+            final int[] out = new int[n];
+            for (int c = 0; c < split.size(); c++) for (final int i : split.get(c)) out[i] = c;
+            return out;
+        }
+
+        /**
+         * Solves and cuts until the ILP's answer holds only valid channels. Null if it stops first, or
+         * claims something worse than {@code incumbent}, a value some valid split already reaches.
+         */
+        @Nullable
+        private List<List<Integer>> settle(final Supplier<Model> build, final double incumbent) {
+            while (!budget.expired()) {
+                final Model model = build.get();
+                final Optimisation.Result result = model.m.minimise();
+                if (!result.getState()
+                    .isFeasible() || result.getValue() > incumbent + 0.5) return null;
+                final List<List<Integer>> split = model.read();
+                if (split == null) return null;
+                final List<List<Integer>> sound = new ArrayList<>();
+                boolean clean = true;
+                for (final List<Integer> channel : split) {
+                    if (verdict(channel).valid()) {
+                        sound.add(channel);
+                        continue;
+                    }
+                    clean = false;
+                    cut(channel);
+                    sound.addAll(firstFit(channel));
+                }
+                if (better(sound)) best = sound;
+                if (clean) return result.getState()
+                    .isOptimal() ? split : null;
+            }
+            return null;
+        }
+
+        /**
+         * Cuts off an invalid channel: the smallest part of it that is still invalid for a reason no
+         * other member of the channel lifts.
+         */
+        private void cut(final List<Integer> channel) {
+            final Set<Integer> all = Set.copyOf(channel);
+            final List<Integer> core = new ArrayList<>(channel);
+            for (int i = core.size() - 1; i >= 0 && core.size() > 2; i--) {
+                final Integer dropped = core.remove(i);
+                if (!stuck(verdict(core), all)) core.add(i, dropped);
+            }
+            addCuts(core, verdict(core), all);
+        }
+
+        private static boolean stuck(final Verdict v, final Set<Integer> channel) {
+            return !v.valid() && v.fixes()
+                .stream()
+                .anyMatch(f -> disjoint(f, channel));
+        }
+
+        private void addCuts(final List<Integer> core, final Verdict v, final Set<Integer> channel) {
+            for (final Set<Integer> fix : v.fixes()) {
+                if (fix.isEmpty()) {
+                    cuts.add(new Cut(List.copyOf(core), Set.of()));
+                    return;
+                }
+            }
+            for (final Set<Integer> fix : v.fixes()) {
+                if (disjoint(fix, channel)) cuts.add(new Cut(List.copyOf(core), Set.copyOf(fix)));
+            }
+        }
+
+        private static boolean disjoint(final Set<Integer> a, final Set<Integer> b) {
+            for (final int i : a) if (b.contains(i)) return false;
+            return true;
+        }
+
+        private Verdict verdict(final List<Integer> members) {
+            return verdicts.computeIfAbsent(Set.copyOf(members), k -> judge(p, members, mode));
+        }
+
+        /** Each recipe into the first channel that takes it; singletons are always valid. */
+        private List<List<Integer>> firstFit(final List<Integer> recipes) {
+            final List<List<Integer>> out = new ArrayList<>();
+            for (final int r : recipes) {
+                boolean placed = false;
+                for (final List<Integer> c : out) {
+                    c.add(r);
+                    if (verdict(c).valid()) {
+                        placed = true;
+                        break;
+                    }
+                    c.removeLast();
+                }
+                if (!placed) out.add(new ArrayList<>(List.of(r)));
+            }
+            return out;
+        }
+
+        private boolean better(final List<List<Integer>> split) {
+            if (split.size() != best.size()) return split.size() < best.size();
+            return blocks(split) < blocks(best);
+        }
+
+        private int blocks(final List<List<Integer>> split) {
+            int total = 0;
+            for (final List<Integer> c : split) total += parts(p, c, mode).blocks();
+            return total;
+        }
+
+        private Solution solution(final boolean channelsMinimal, final boolean blocksMinimal) {
             final List<Channel> out = new ArrayList<>();
             for (final List<Integer> members : best) {
-                final List<Set<String>> checkOrder = checkOrder(p, members, mode);
+                final List<Set<Ingredient.Item>> checkOrder = checkOrder(p, members, mode);
                 if (checkOrder == null) throw new IllegalStateException("solver kept an invalid channel");
                 final List<Integer> sorted = new ArrayList<>(members);
                 sorted.sort(
@@ -311,137 +551,169 @@ public final class ChannelSolver {
                         .thenComparingInt(i -> i));
                 out.add(new Channel(List.copyOf(sorted), List.copyOf(checkOrder), parts(p, members, mode)));
             }
-            final Comparator<Set<String>> sets = p.catalystOrder();
-            out.sort(
-                (a, b) -> sets.compare(
-                    p.recipes()
-                        .get(
-                            a.members()
-                                .getFirst())
-                        .catalysts(),
-                    p.recipes()
-                        .get(
-                            b.members()
-                                .getFirst())
-                        .catalysts()));
-
+            final Comparator<Set<Ingredient.Item>> sets = p.catalystOrder();
+            out.sort(Comparator.comparing(c -> first(c), sets));
             Parts total = Parts.ZERO;
             for (final Channel c : out) total = total.plus(c.parts());
             final int machines = mode == Mode.COLOR ? out.size() : (out.size() + COLORS - 1) / COLORS;
             return new Solution(mode, List.copyOf(out), machines, total, channelsMinimal, blocksMinimal);
         }
 
-        /** Each recipe, in search order, into the first channel that takes it. */
-        private List<List<Integer>> firstFit() {
-            final List<List<Integer>> out = new ArrayList<>();
-            for (final int r : order) {
-                boolean placed = false;
-                for (final List<Integer> c : out) {
-                    c.add(r);
-                    if (valid(c)) {
-                        placed = true;
-                        break;
+        private Set<Ingredient.Item> first(final Channel c) {
+            return p.recipes()
+                .get(
+                    c.members()
+                        .getFirst())
+                .catalysts();
+        }
+
+        /**
+         * Channel c opens only after channel c-1 has a recipe, so each split has one labeling. Pass 1
+         * minimizes channels. Pass 2 keeps at most k and minimizes blocks. The canonical pass also caps
+         * blocks, fixes recipes before {@code recipe} to their labels and minimizes its channel.
+         */
+        private final class Model {
+
+            final ExpressionsBasedModel m = new ExpressionsBasedModel();
+            final Variable[][] x = new Variable[n][];
+
+            Model(final int k, final Goal goal, @Nullable final int[] fixed, final int recipe, final int cap) {
+                final long millis = Math.max(1, budget.remaining());
+                m.options.time_abort = millis;
+                m.options.time_suffice = millis;
+                m.options.iterations_abort = limits.nodesPerSolve();
+                m.options.iterations_suffice = limits.nodesPerSolve();
+                // Cut rounds overran the time limit many times over; the cliques do more for this model
+                m.options.integer(
+                    IntegerStrategy.DEFAULT.withGapTolerance(NumberContext.of(12, 8))
+                        .withCutConfiguration(new IntegerStrategy.CutConfiguration().withTypes()));
+                m.options.parallelism(1);
+
+                for (int i = 0; i < n; i++) {
+                    x[i] = new Variable[Math.min(i + 1, k)];
+                    final Expression one = row("assign_" + i).level(1);
+                    for (int c = 0; c < x[i].length; c++) {
+                        x[i][c] = m.addVariable("x_" + i + "_" + c)
+                            .binary();
+                        one.set(x[i][c], 1);
+                        if (fixed != null && i < recipe) x[i][c].level(c == fixed[i] ? 1 : 0);
+                        if (goal == Goal.CANONICAL && i == recipe) x[i][c].weight(c);
                     }
-                    c.removeLast();
                 }
-                if (!placed) out.add(new ArrayList<>(List.of(r)));
+                for (int i = 1; i < n; i++) {
+                    for (int c = 1; c < x[i].length; c++) {
+                        final Expression opened = row("open_" + i + "_" + c).upper(0)
+                            .set(x[i][c], 1);
+                        for (int j = c - 1; j < i; j++) opened.set(x[j][c - 1], -1);
+                    }
+                }
+                if (goal == Goal.CHANNELS) {
+                    // Channel c counts once it holds a recipe
+                    for (int c = 0; c < k; c++) {
+                        final Variable used = m.addVariable("used_" + c)
+                            .binary()
+                            .weight(1);
+                        for (int i = c; i < n; i++) row("link_" + i + "_" + c).upper(0)
+                            .set(x[i][c], 1)
+                            .set(used, -1);
+                    }
+                }
+                for (int q = 0; q < cliques.size(); q++) {
+                    for (int c = 0; c < k; c++) {
+                        final Expression row = row("clique_" + q + "_" + c).upper(1);
+                        for (final int i : cliques.get(q)) if (c < x[i].length) row.set(x[i][c], 1);
+                    }
+                }
+                int id = 0;
+                for (final Cut cut : cuts) {
+                    for (int c = 0; c < k; c++) {
+                        if (!allReach(cut.together(), c)) continue;
+                        final Expression row = row("cut_" + id++).upper(
+                            cut.together()
+                                .size() - 1);
+                        for (final int i : cut.together()) row.set(x[i][c], 1);
+                        for (final int r : cut.unless()) if (c < x[r].length) row.set(x[r][c], -1);
+                    }
+                }
+                if (goal == Goal.BLOCKS) blockCosts(k, null);
+                if (goal == Goal.CANONICAL) blockCosts(k, row("blocks").upper(cap));
             }
-            return out;
-        }
 
-        private void startPass() {
-            nodes = 0;
-            stopped = false;
-        }
-
-        /** Counts a node; false once this pass's nodes or the shared clock have run out. */
-        private boolean step() {
-            if (stopped) return false;
-            if (++nodes > limits.nodesPerPass() || budget.expired()) stopped = true;
-            return !stopped;
-        }
-
-        private boolean valid(final List<Integer> members) {
-            return validCache.computeIfAbsent(Set.copyOf(members), k -> checkOrder(p, members, mode) != null);
-        }
-
-        private int blocks(final List<Integer> members) {
-            return blocksCache.computeIfAbsent(Set.copyOf(members), k -> parts(p, members, mode).blocks());
-        }
-
-        private int cost(final List<List<Integer>> chs) {
-            int c = 0;
-            for (final List<Integer> ch : chs) c += blocks(ch);
-            return c;
-        }
-
-        /** Pass 1: the minimum channel count. */
-        private void fewest(final int k) {
-            if (!step() || channels.size() >= best.size()) return;
-            if (k == n) {
-                best = copy(channels);
-                return;
+            /**
+             * Hatch blocks round up from the largest recipe's fluids; a bus per bus key. Minimized, or
+             * summed into {@code total} when it is given.
+             */
+            private void blockCosts(final int k, @Nullable final Expression total) {
+                final Map<Object, List<Integer>> buses = new LinkedHashMap<>();
+                for (int i = 0; i < n; i++) {
+                    final Object key = busKey(p, i, mode);
+                    if (key != null) buses.computeIfAbsent(key, _ -> new ArrayList<>())
+                        .add(i);
+                }
+                int maxFluids = 0;
+                for (final ChannelProblem.Recipe r : p.recipes()) maxFluids = Math.max(maxFluids, r.fluidInputs());
+                for (int c = 0; c < k; c++) {
+                    final Variable hatches = cost(
+                        m.addVariable("hatches_" + c)
+                            .integer()
+                            .lower(0)
+                            .upper((maxFluids + QUAD - 1) / QUAD),
+                        total);
+                    for (int i = c; i < n; i++) {
+                        final int fluids = p.recipes()
+                            .get(i)
+                            .fluidInputs();
+                        if (fluids > 0) row("hatch_" + i + "_" + c).upper(0)
+                            .set(x[i][c], fluids)
+                            .set(hatches, -QUAD);
+                    }
+                    int b = 0;
+                    for (final List<Integer> members : buses.values()) {
+                        final Variable bus = cost(
+                            m.addVariable("bus_" + b + "_" + c)
+                                .binary(),
+                            total);
+                        for (final int i : members) {
+                            if (c < x[i].length) row("bus_" + b + "_" + i + "_" + c).upper(0)
+                                .set(x[i][c], 1)
+                                .set(bus, -1);
+                        }
+                        b++;
+                    }
+                }
             }
-            final int r = order[k];
-            // By index: deeper calls add and remove channels, leaving the list as they found it
-            for (int ci = 0, size = channels.size(); ci < size; ci++) {
-                final List<Integer> c = channels.get(ci);
-                c.add(r);
-                if (valid(c)) fewest(k + 1);
-                c.removeLast();
-            }
-            channels.add(new ArrayList<>(List.of(r)));
-            fewest(k + 1);
-            channels.removeLast();
-        }
 
-        /** Pass 2: the fewest blocks with exactly {@link #target} channels. */
-        private void cheapest(final int k) {
-            if (!step() || lowerBound(k) >= bestCost) return;
-            if (k == n) {
-                best = copy(channels);
-                bestCost = cost(channels);
-                return;
+            private static Variable cost(final Variable v, @Nullable final Expression total) {
+                if (total == null) return v.weight(1);
+                total.set(v, 1);
+                return v;
             }
-            final int r = order[k];
-            // By index: deeper calls add and remove channels, leaving the list as they found it
-            for (int ci = 0, size = channels.size(); ci < size; ci++) {
-                final List<Integer> c = channels.get(ci);
-                c.add(r);
-                if (valid(c)) cheapest(k + 1);
-                c.removeLast();
-            }
-            if (channels.size() < target) {
-                channels.add(new ArrayList<>(List.of(r)));
-                cheapest(k + 1);
-                channels.removeLast();
-            }
-        }
 
-        private int lowerBound(final int k) {
-            int bound = cost(channels);
-            if (mode == Mode.COLOR) {
-                // Every catalyst set not placed yet needs at least a bus of its own
-                final Set<Set<String>> placed = new HashSet<>();
-                for (final List<Integer> c : channels) for (final int i : c) placed.add(
-                    p.recipes()
-                        .get(i)
-                        .catalysts());
-                final Set<Set<String>> pending = new HashSet<>();
-                for (int j = k; j < n; j++) pending.add(
-                    p.recipes()
-                        .get(order[j])
-                        .catalysts());
-                pending.removeAll(placed);
-                bound += pending.size();
+            private boolean allReach(final List<Integer> recipes, final int c) {
+                for (final int i : recipes) if (c >= x[i].length) return false;
+                return true;
             }
-            return bound;
-        }
 
-        private static List<List<Integer>> copy(final List<List<Integer>> chs) {
-            final List<List<Integer>> out = new ArrayList<>();
-            for (final List<Integer> c : chs) out.add(new ArrayList<>(c));
-            return out;
+            private Expression row(final String name) {
+                return m.addExpression(name);
+            }
+
+            /** The split the solve landed on, or null if it leaves a recipe out. */
+            @Nullable
+            List<List<Integer>> read() {
+                final Map<Integer, List<Integer>> byChannel = new LinkedHashMap<>();
+                for (int i = 0; i < n; i++) {
+                    int channel = -1;
+                    for (int c = 0; c < x[i].length && channel < 0; c++) {
+                        final Number v = x[i][c].getValue();
+                        if (v != null && v.doubleValue() > 0.5) channel = c;
+                    }
+                    if (channel < 0) return null;
+                    byChannel.computeIfAbsent(channel, _ -> new ArrayList<>())
+                        .add(i);
+                }
+                return new ArrayList<>(byChannel.values());
+            }
         }
     }
 }

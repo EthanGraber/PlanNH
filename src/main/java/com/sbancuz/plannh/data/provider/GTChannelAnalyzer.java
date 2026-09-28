@@ -8,8 +8,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
@@ -21,188 +23,286 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraftforge.fluids.FluidStack;
 
-import com.sbancuz.plannh.data.RecipeHandlerAccess;
 import com.sbancuz.plannh.data.channels.ChannelProblem;
+import com.sbancuz.plannh.data.channels.ChannelProblem.Feed;
 import com.sbancuz.plannh.data.channels.ChannelReport;
 import com.sbancuz.plannh.data.channels.ChannelReport.Finding;
 import com.sbancuz.plannh.data.channels.ChannelReport.Kind;
 import com.sbancuz.plannh.data.channels.ChannelSolver;
 import com.sbancuz.plannh.data.channels.ChannelSolver.Mode;
+import com.sbancuz.plannh.data.channels.Ingredient;
 import com.sbancuz.plannh.data.flowchart.Graph;
+import com.sbancuz.plannh.data.flowchart.Group;
+import com.sbancuz.plannh.data.flowchart.MachineGroup;
 import com.sbancuz.plannh.data.flowchart.Node;
 
-import codechicken.nei.recipe.RecipeHandlerRef;
-import codechicken.nei.recipe.TemplateRecipeHandler;
+import gregtech.api.enums.Dyes;
 import gregtech.api.recipe.RecipeMap;
 import gregtech.api.util.GTRecipe;
 import gregtech.api.util.GTUtility;
-import gregtech.nei.GTNEIDefaultHandler;
-import gregtech.nei.GTNEIDefaultHandler.CachedDefaultRecipe;
 
 /**
- * Finds, for every GT recipe on a chart, the other recipes in its machine's recipe maps that could run on
- * its inputs instead, using GT's own recipe matcher, and hands them to {@link ChannelSolver}.
+ * Finds what else could run on a chart's GT recipes, with GT's own matcher (so ore dictionary,
+ * wildcards and NBT behave as in the machine), and lays out channels for it. Queries never write GT's
+ * lookup cache.
  * <p>
- * A plan recipe A is queried twice: with its inputs plus every catalyst the machine's plan recipes use
- * (anything that could share a channel with it), and with only its fluids plus those catalysts (what a
- * bus of another color sees through shared uncolored hatches). Queries never write GT's lookup cache.
+ * A batch feed queries each plan recipe's batch plus every plan catalyst, and its fluids alone plus
+ * those catalysts (what another color sees through uncolored hatches). A passive feed queries
+ * everything the pool's recipes use, at any amount, since leftovers mix.
  */
 public final class GTChannelAnalyzer {
 
     private static final String CIRCUIT = "gregtech:gt.integrated_circuit";
-    private static final int FULL_CHANCE = 10000;
 
     private GTChannelAnalyzer() {}
 
-    /** A distinct plan recipe on one machine type, and the nodes that run it. */
     private record Entry(GTRecipe recipe, RecipeMap<?> map, List<UUID> nodeIds) {}
 
-    public static ChannelReport analyze(@Nonnull final Graph graph, final boolean respectAmounts) {
-        // Machine type is the recipe handler, as for machine groups; the display name only labels it
-        final Map<String, List<Entry>> byHandler = new LinkedHashMap<>();
-        final Map<String, String> labels = new HashMap<>();
-        final Map<String, Map<GTRecipe, Entry>> seen = new HashMap<>();
+    /** The nodes one pool of machines runs. */
+    private static final class Pool {
+
+        final String handler;
+        final String machine;
+        @Nullable
+        final MachineGroup group;
+        final Map<GTRecipe, Entry> entries = new IdentityHashMap<>();
+        final List<Entry> order = new ArrayList<>();
+
+        Pool(final String handler, final String machine, @Nullable final MachineGroup group) {
+            this.handler = handler;
+            this.machine = machine;
+            this.group = group;
+        }
+    }
+
+    public static ChannelReport analyze(@Nonnull final Graph graph, @Nonnull final Feed feed) {
+        final Map<UUID, MachineGroup> groupOf = new HashMap<>();
+        for (final Group g : graph.getGroups()) {
+            if (g instanceof final MachineGroup mg) for (final UUID id : mg.getNodeIds()) groupOf.put(id, mg);
+        }
+        // A machine group is one pool; the rest pool by machine type
+        final Map<Object, Pool> pools = new LinkedHashMap<>();
         for (final Node node : graph.getNodes()) {
-            final GTRecipe recipe = recipeOf(node);
-            final RecipeMap<?> map = mapOf(node);
-            if (recipe == null || map == null) continue;
+            if (!(node.properties.get(GTProvider.GT_RECIPE) instanceof final GTRecipe recipe)
+                || !(node.properties.get(GTProvider.RECIPE_MAP) instanceof final RecipeMap<?> map)) continue;
             final String handler = node.handlerName()
                 .isEmpty() ? map.unlocalizedName : node.handlerName();
-            labels.putIfAbsent(handler, node.machineName != null ? node.machineName : map.unlocalizedName);
-            final Map<GTRecipe, Entry> known = seen.computeIfAbsent(handler, k -> new IdentityHashMap<>());
-            Entry e = known.get(recipe);
+            final MachineGroup group = groupOf.get(node.id);
+            final Pool pool = pools.computeIfAbsent(
+                group != null ? group : handler,
+                k -> new Pool(handler, node.machineName != null ? node.machineName : map.unlocalizedName, group));
+            Entry e = pool.entries.get(recipe);
             if (e == null) {
                 e = new Entry(recipe, map, new ArrayList<>());
-                known.put(recipe, e);
-                byHandler.computeIfAbsent(handler, k -> new ArrayList<>())
-                    .add(e);
+                pool.entries.put(recipe, e);
+                pool.order.add(e);
             }
             e.nodeIds()
                 .add(node.id);
         }
 
         final List<ChannelReport.MachineReport> machines = new ArrayList<>();
-        for (final Map.Entry<String, List<Entry>> m : byHandler.entrySet()) {
-            final ChannelReport.MachineReport report = analyzeMachine(
-                m.getKey(),
-                labels.get(m.getKey()),
-                m.getValue(),
-                respectAmounts);
+        for (final Pool pool : pools.values()) {
+            final ChannelReport.MachineReport report = analyzePool(pool, feed);
             // A lone recipe with nothing to warn about has nothing to say
             if (report.recipes()
-                .size() > 1 || report.findings()
+                .size() > 1 || pool.group != null
+                || report.findings()
                     .stream()
                     .anyMatch(f -> f.kind() == Kind.INHERENT)) {
                 machines.add(report);
             }
         }
-        machines.sort(Comparator.comparing(ChannelReport.MachineReport::machine));
-        return new ChannelReport(List.copyOf(machines));
+        machines.sort(
+            Comparator.comparing(ChannelReport.MachineReport::machine)
+                .thenComparing(m -> Objects.toString(m.group(), "")));
+        final List<ChannelReport.Dye> dyes = new ArrayList<>();
+        for (int i = 0; i < ChannelSolver.COLORS; i++) {
+            final Dyes d = Dyes.get(i);
+            dyes.add(new ChannelReport.Dye(d.rgb, d.getLocalizedDyeName()));
+        }
+        return new ChannelReport(List.copyOf(machines), List.copyOf(dyes));
     }
 
-    private static ChannelReport.MachineReport analyzeMachine(final String handler, final String machine,
-        final List<Entry> entries, final boolean respectAmounts) {
-        // Every catalyst the machine's plan recipes use: anything a channel could hold
-        final Map<String, ItemStack> universe = new LinkedHashMap<>();
-        final Map<String, String> names = new HashMap<>();
-        final List<Set<String>> catalystSets = new ArrayList<>();
-        for (final Entry e : entries) {
-            final Set<String> catalysts = new HashSet<>();
-            for (final ItemStack s : items(e.recipe())) {
-                if (s.stackSize != 0) continue;
-                final String key = key(s);
+    private static ChannelReport.MachineReport analyzePool(final Pool pool, final Feed feed) {
+        final List<Entry> entries = pool.order;
+        final Map<Ingredient, String> names = new HashMap<>();
+        // Every catalyst the pool uses: anything a channel could hold
+        final Map<Ingredient.Item, ItemStack> catalystStacks = new LinkedHashMap<>();
+        final List<ChannelProblem.Recipe> recipes = new ArrayList<>();
+        final List<ChannelReport.PlanRecipe> planRecipes = new ArrayList<>();
+        final Map<GTRecipe, Integer> planIndex = new IdentityHashMap<>();
+        final Set<RecipeMap<?>> maps = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int i = 0; i < entries.size(); i++) {
+            final Entry e = entries.get(i);
+            final GTRecipe r = e.recipe();
+            final Set<Ingredient.Item> catalysts = new HashSet<>();
+            final Set<Ingredient> inputs = new HashSet<>();
+            for (final ItemStack s : items(r)) {
+                final Ingredient.Item key = key(s);
+                names.putIfAbsent(key, itemName(s));
+                if (s.stackSize != 0) {
+                    inputs.add(key);
+                    continue;
+                }
                 catalysts.add(key);
                 final ItemStack one = s.copy();
                 one.stackSize = 1;
-                universe.putIfAbsent(key, one);
-                names.putIfAbsent(key, catalystName(s));
+                catalystStacks.putIfAbsent(key, one);
             }
-            catalystSets.add(Set.copyOf(catalysts));
+            fluids(r).forEach(f -> {
+                final Ingredient.Fluid key = key(f);
+                names.putIfAbsent(key, f.getLocalizedName());
+                inputs.add(key);
+            });
+            recipes.add(new ChannelProblem.Recipe(Set.copyOf(catalysts), Set.copyOf(inputs)));
+            planRecipes.add(new ChannelReport.PlanRecipe(label(r), Set.copyOf(catalysts), List.copyOf(e.nodeIds())));
+            planIndex.put(r, i);
+            maps.add(e.map());
         }
-        final ItemStack[] catalystStacks = universe.values()
-            .toArray(new ItemStack[0]);
-        final Map<GTRecipe, Integer> planIndex = new IdentityHashMap<>();
-        for (int i = 0; i < entries.size(); i++) planIndex.put(
-            entries.get(i)
-                .recipe(),
-            i);
-        final Set<RecipeMap<?>> maps = Collections.newSetFromMap(new IdentityHashMap<>());
-        for (final Entry e : entries) maps.add(e.map());
 
-        final List<ChannelProblem.Recipe> recipes = new ArrayList<>();
-        final List<List<ChannelProblem.Hijack>> hijacks = new ArrayList<>();
         final List<Finding> findings = new ArrayList<>();
-        final List<ChannelReport.PlanRecipe> planRecipes = new ArrayList<>();
+        final ChannelProblem problem = feed == Feed.BATCH
+            ? batchProblem(entries, recipes, catalystStacks, planIndex, maps, findings)
+            : passiveProblem(entries, recipes, planIndex, maps, findings);
 
-        for (int ai = 0; ai < entries.size(); ai++) {
-            final Entry entry = entries.get(ai);
-            final GTRecipe a = entry.recipe();
-            final Set<String> catalystsA = catalystSets.get(ai);
-            final List<ItemStack> consumed = new ArrayList<>();
-            for (final ItemStack s : items(a)) if (s.stackSize > 0) consumed.add(s.copy());
-            final FluidStack[] fluids = fluids(a).map(FluidStack::copy)
-                .toArray(FluidStack[]::new);
-
-            final ItemStack[] withItems = Stream.concat(consumed.stream(), Stream.of(catalystStacks))
-                .toArray(ItemStack[]::new);
-            final Set<GTRecipe> hits = find(maps, withItems, fluids, a, respectAmounts);
-            final Set<GTRecipe> fluidHits = find(maps, catalystStacks, fluids, a, respectAmounts);
-
-            final List<ChannelProblem.Hijack> own = new ArrayList<>();
-            for (final GTRecipe b : hits) {
-                final Set<String> needs = needs(b, consumed, universe);
-                final int plan = planIndex.getOrDefault(b, -1);
-                final long[] k = exactMultiple(a, b);
-                if (k != null) {
-                    final double time = a.mDuration > 0 ? (double) b.mDuration * k[1] / k[0] / a.mDuration : 0;
-                    findings.add(new Finding(Kind.TOLERATED, ai, label(b), needs, plan >= 0, scale(k), b.mEUt, time));
-                } else if (catalystsA.containsAll(needs)) {
-                    findings.add(new Finding(Kind.INHERENT, ai, label(b), needs, plan >= 0, "", b.mEUt, 0));
-                } else {
-                    own.add(new ChannelProblem.Hijack(needs, fluidHits.contains(b), plan));
-                    findings.add(new Finding(Kind.CONFLICT, ai, label(b), needs, plan >= 0, "", b.mEUt, 0));
-                }
-            }
-
-            final boolean hasItems = !consumed.isEmpty() || !catalystsA.isEmpty();
-            final int distinctFluids = (int) fluids(a).map(
-                f -> f.getFluid()
-                    .getName())
-                .distinct()
-                .count();
-            recipes.add(new ChannelProblem.Recipe(catalystsA, distinctFluids, hasItems));
-            hijacks.add(own);
-            planRecipes.add(new ChannelReport.PlanRecipe(label(a), catalystsA, List.copyOf(entry.nodeIds())));
-        }
-
-        final ChannelProblem problem = new ChannelProblem(recipes, hijacks, KEY_ORDER);
         final Map<Mode, ChannelSolver.Solution> solutions = new EnumMap<>(Mode.class);
         for (final Mode mode : Mode.values()) solutions.put(mode, ChannelSolver.solve(problem, mode));
         return new ChannelReport.MachineReport(
-            handler,
-            machine,
+            pool.handler,
+            pool.machine,
+            pool.group != null ? pool.group.getHeader() : null,
+            pool.group != null ? pool.group.getMachineCapacity() : 0,
             List.copyOf(planRecipes),
             Map.copyOf(names),
             Map.copyOf(solutions),
             List.copyOf(findings),
-            new HashSet<>(catalystSets).size());
+            (int) recipes.stream()
+                .map(ChannelProblem.Recipe::catalysts)
+                .distinct()
+                .count());
     }
 
-    /** Circuits first, by number; other catalysts after, by key. */
-    private static final Comparator<String> KEY_ORDER = Comparator.<String>comparingInt(k -> circuitNumber(k))
-        .thenComparing(Comparator.naturalOrder());
+    private static ChannelProblem batchProblem(final List<Entry> entries, final List<ChannelProblem.Recipe> recipes,
+        final Map<Ingredient.Item, ItemStack> catalystStacks, final Map<GTRecipe, Integer> planIndex,
+        final Set<RecipeMap<?>> maps, final List<Finding> findings) {
+        final ItemStack[] catalysts = catalystStacks.values()
+            .toArray(new ItemStack[0]);
+        final List<List<ChannelProblem.Hijack>> hijacks = new ArrayList<>();
+        for (int ai = 0; ai < entries.size(); ai++) {
+            final GTRecipe a = entries.get(ai)
+                .recipe();
+            final Set<Ingredient.Item> catalystsA = recipes.get(ai)
+                .catalysts();
+            final List<ItemStack> consumed = new ArrayList<>();
+            for (final ItemStack s : items(a)) if (s.stackSize > 0) consumed.add(s.copy());
+            final FluidStack[] fluids = fluids(a).map(FluidStack::copy)
+                .toArray(FluidStack[]::new);
+            final ItemStack[] batch = Stream.concat(consumed.stream(), Stream.of(catalysts))
+                .toArray(ItemStack[]::new);
+            final Set<GTRecipe> hits = find(maps, batch, fluids, true);
+            final Set<GTRecipe> fluidHits = find(maps, catalysts, fluids, true);
+            hits.remove(a);
 
-    private static int circuitNumber(final String key) {
-        if (!key.startsWith(CIRCUIT + ":")) return Integer.MAX_VALUE;
-        try {
-            return Integer.parseInt(key.substring(CIRCUIT.length() + 1));
-        } catch (final NumberFormatException e) {
-            return Integer.MAX_VALUE;
+            final List<ChannelProblem.Hijack> own = new ArrayList<>();
+            for (final GTRecipe b : hits) {
+                final Set<Ingredient.Item> needs = catalystNeeds(b, consumed, catalystStacks);
+                final List<Set<Ingredient>> shown = needs.stream()
+                    .<Set<Ingredient>>map(Set::of)
+                    .toList();
+                final int plan = planIndex.getOrDefault(b, -1);
+                final long[] k = exactMultiple(a, b);
+                if (k != null) {
+                    findings.add(tolerated(ai, a, b, k, shown, plan >= 0));
+                } else if (catalystsA.containsAll(needs)) {
+                    findings.add(new Finding(Kind.INHERENT, ai, label(b), shown, plan >= 0, "", b.mEUt, 0));
+                } else {
+                    own.add(new ChannelProblem.Hijack(needs, fluidHits.contains(b), plan));
+                    findings.add(new Finding(Kind.CONFLICT, ai, label(b), shown, plan >= 0, "", b.mEUt, 0));
+                }
+            }
+            hijacks.add(own);
         }
+        return new ChannelProblem(Feed.BATCH, recipes, hijacks, List.of(), KEY_ORDER);
     }
+
+    private static ChannelProblem passiveProblem(final List<Entry> entries, final List<ChannelProblem.Recipe> recipes,
+        final Map<GTRecipe, Integer> planIndex, final Set<RecipeMap<?>> maps, final List<Finding> findings) {
+        // Everything the pool's recipes bring, by key, as the stacks to query with
+        final Map<Ingredient.Item, ItemStack> items = new LinkedHashMap<>();
+        final Map<Ingredient.Fluid, FluidStack> fluids = new LinkedHashMap<>();
+        for (final Entry e : entries) {
+            for (final ItemStack s : items(e.recipe())) {
+                final ItemStack copy = s.copy();
+                copy.stackSize = Math.max(1, copy.stackSize);
+                items.putIfAbsent(key(s), copy);
+            }
+            fluids(e.recipe()).forEach(f -> fluids.putIfAbsent(key(f), f.copy()));
+        }
+        final Set<GTRecipe> hits = find(
+            maps,
+            items.values()
+                .toArray(new ItemStack[0]),
+            fluids.values()
+                .toArray(new FluidStack[0]),
+            false);
+
+        final List<ChannelProblem.Intruder> intruders = new ArrayList<>();
+        for (final GTRecipe x : hits) {
+            final List<Set<Ingredient>> needs = passiveNeeds(x, items, fluids);
+            int owner = planIndex.getOrDefault(x, -1);
+            final boolean plan = owner >= 0;
+            if (!plan) {
+                for (int i = 0; i < entries.size() && owner < 0; i++) {
+                    final long[] k = exactMultiple(
+                        entries.get(i)
+                            .recipe(),
+                        x);
+                    if (k == null) continue;
+                    owner = i;
+                    findings.add(
+                        tolerated(
+                            i,
+                            entries.get(i)
+                                .recipe(),
+                            x,
+                            k,
+                            needs,
+                            false));
+                }
+            }
+            final ChannelProblem.Intruder intruder = new ChannelProblem.Intruder(needs, owner);
+            boolean inherent = false;
+            for (int i = 0; i < recipes.size(); i++) {
+                if (i == owner || !intruder.metBy(
+                    recipes.get(i)
+                        .held()))
+                    continue;
+                findings.add(new Finding(Kind.INHERENT, i, label(x), needs, plan, "", x.mEUt, 0));
+                inherent = true;
+            }
+            if (inherent) continue;
+            intruders.add(intruder);
+            if (owner < 0) findings.add(new Finding(Kind.CONFLICT, -1, label(x), needs, false, "", x.mEUt, 0));
+        }
+        return new ChannelProblem(Feed.PASSIVE, recipes, List.of(), intruders, KEY_ORDER);
+    }
+
+    private static Finding tolerated(final int victim, final GTRecipe a, final GTRecipe b, final long[] k,
+        final List<Set<Ingredient>> needs, final boolean plan) {
+        final double time = a.mDuration > 0 ? (double) b.mDuration * k[1] / k[0] / a.mDuration : 0;
+        return new Finding(Kind.TOLERATED, victim, label(b), needs, plan, scale(k), b.mEUt, time);
+    }
+
+    /** Circuits first, by number; other catalysts after. */
+    private static final Comparator<Ingredient.Item> KEY_ORDER = Comparator.<Ingredient.Item>comparingInt(
+        i -> CIRCUIT.equals(i.id()) ? i.meta() : Integer.MAX_VALUE)
+        .thenComparing(Ingredient.Item::id)
+        .thenComparingInt(Ingredient.Item::meta)
+        .thenComparing(i -> Objects.toString(i.nbt(), ""));
 
     private static Set<GTRecipe> find(final Set<RecipeMap<?>> maps, final ItemStack[] items, final FluidStack[] fluids,
-        final GTRecipe self, final boolean respectAmounts) {
+        final boolean respectAmounts) {
         final Set<GTRecipe> out = Collections.newSetFromMap(new IdentityHashMap<>());
         for (final RecipeMap<?> map : maps) {
             map.findRecipeQuery()
@@ -210,30 +310,66 @@ public final class GTChannelAnalyzer {
                 .fluids(fluids)
                 .dontCheckStackSizes(!respectAmounts)
                 .findAll()
-                .filter(r -> r != self && r.mEnabled && !r.mFakeRecipe)
+                .filter(r -> r.mEnabled && !r.mFakeRecipe)
                 .forEach(out::add);
         }
         return out;
     }
 
     /**
-     * The plan catalysts {@code b} needs present: its own catalysts, and any plan catalyst it consumes,
-     * unless the victim's own consumed inputs already cover that input.
+     * The plan catalysts {@code b} needs present: its own, and any it consumes that the victim's batch
+     * doesn't already hold.
      */
-    private static Set<String> needs(final GTRecipe b, final List<ItemStack> victimConsumed,
-        final Map<String, ItemStack> universe) {
-        final Set<String> needs = new HashSet<>();
+    private static Set<Ingredient.Item> catalystNeeds(final GTRecipe b, final List<ItemStack> victimConsumed,
+        final Map<Ingredient.Item, ItemStack> catalysts) {
+        final Set<Ingredient.Item> needs = new HashSet<>();
         for (final ItemStack in : items(b)) {
             if (victimConsumed.stream()
                 .anyMatch(v -> GTUtility.areStacksEqual(in, v))) continue;
-            for (final Map.Entry<String, ItemStack> u : universe.entrySet()) {
-                if (GTUtility.areStacksEqual(in, u.getValue())) {
-                    needs.add(u.getKey());
+            for (final Map.Entry<Ingredient.Item, ItemStack> c : catalysts.entrySet()) {
+                if (GTUtility.areStacksEqual(in, c.getValue())) {
+                    needs.add(c.getKey());
                     break;
                 }
             }
         }
         return Set.copyOf(needs);
+    }
+
+    /**
+     * Per ingredient of {@code x}, the pool's keys that satisfy it. An ingredient GT matched in a way
+     * this can't map back is left out, which only makes the intruder look easier to avoid.
+     */
+    private static List<Set<Ingredient>> passiveNeeds(final GTRecipe x, final Map<Ingredient.Item, ItemStack> items,
+        final Map<Ingredient.Fluid, FluidStack> fluids) {
+        final List<Set<Ingredient>> needs = new ArrayList<>();
+        for (final ItemStack in : items(x)) {
+            final Set<Ingredient> any = new LinkedHashSet<>();
+            for (final Map.Entry<Ingredient.Item, ItemStack> e : items.entrySet()) {
+                if (GTUtility.areStacksEqual(in, e.getValue()) || GTUtility.areUnificationsEqual(in, e.getValue())) {
+                    any.add(e.getKey());
+                }
+            }
+            if (!any.isEmpty()) needs.add(Set.copyOf(any));
+        }
+        final FluidStack[] ins = x.mFluidInputs == null ? new FluidStack[0] : x.mFluidInputs;
+        for (int j = 0; j < ins.length; j++) {
+            if (ins[j] == null || ins[j].getFluid() == null) continue;
+            final Set<Ingredient> any = new LinkedHashSet<>();
+            addFluid(any, ins[j], fluids);
+            if (x.mAltFluidInputs != null && j < x.mAltFluidInputs.length && x.mAltFluidInputs[j] != null) {
+                for (final FluidStack alt : x.mAltFluidInputs[j]) addFluid(any, alt, fluids);
+            }
+            if (!any.isEmpty()) needs.add(Set.copyOf(any));
+        }
+        return List.copyOf(needs);
+    }
+
+    private static void addFluid(final Set<Ingredient> any, @Nullable final FluidStack f,
+        final Map<Ingredient.Fluid, FluidStack> fluids) {
+        if (f == null || f.getFluid() == null) return;
+        final Ingredient.Fluid key = key(f);
+        if (fluids.containsKey(key)) any.add(key);
     }
 
     /**
@@ -260,7 +396,6 @@ public final class GTChannelAnalyzer {
         return new long[] { num / g, den / g };
     }
 
-    /** Every amount in {@code b} is num/den of the same key's amount in {@code a}. */
     private static boolean scaled(final Map<String, Long> a, final Map<String, Long> b, final long num,
         final long den) {
         for (final Map.Entry<String, Long> e : a.entrySet()) {
@@ -279,13 +414,10 @@ public final class GTChannelAnalyzer {
 
     private static Map<String, Long> consumed(final GTRecipe r) {
         final Map<String, Long> out = new HashMap<>();
-        for (final ItemStack s : items(r)) if (s.stackSize > 0) out.merge(key(s), (long) s.stackSize, Long::sum);
-        fluids(r).forEach(
-            f -> out.merge(
-                "fluid:" + f.getFluid()
-                    .getName(),
-                (long) f.amount,
-                Long::sum));
+        for (final ItemStack s : items(r)) {
+            if (s.stackSize > 0) out.merge(key(s).toString(), (long) s.stackSize, Long::sum);
+        }
+        fluids(r).forEach(f -> out.merge(key(f).toString(), (long) f.amount, Long::sum));
         return out;
     }
 
@@ -302,18 +434,14 @@ public final class GTChannelAnalyzer {
             for (int i = 0; i < r.mFluidOutputs.length; i++) {
                 final FluidStack f = r.mFluidOutputs[i];
                 if (f == null || f.getFluid() == null) continue;
-                out.merge(
-                    "fluid:" + f.getFluid()
-                        .getName() + "@" + chance(r.mFluidOutputChances, i),
-                    (long) f.amount,
-                    Long::sum);
+                out.merge(key(f) + "@" + chance(r.mFluidOutputChances, i), (long) f.amount, Long::sum);
             }
         }
         return out;
     }
 
     private static int chance(final int[] chances, final int i) {
-        return chances != null && i < chances.length ? chances[i] : FULL_CHANCE;
+        return chances != null && i < chances.length ? chances[i] : (int) GTProvider.GT_CHANCE_SCALE;
     }
 
     private static List<ItemStack> items(final GTRecipe r) {
@@ -328,20 +456,24 @@ public final class GTChannelAnalyzer {
                 .filter(f -> f != null && f.getFluid() != null);
     }
 
-    private static String key(final ItemStack s) {
-        final String id = Item.itemRegistry.getNameForObject(s.getItem());
-        final String base = id + ":" + s.getItemDamage();
-        return s.hasTagCompound() ? base + s.getTagCompound() : base;
+    private static Ingredient.Item key(final ItemStack s) {
+        return new Ingredient.Item(
+            Item.itemRegistry.getNameForObject(s.getItem()),
+            s.getItemDamage(),
+            s.hasTagCompound() ? s.getTagCompound()
+                .toString() : null);
     }
 
-    private static String catalystName(final ItemStack s) {
+    private static Ingredient.Fluid key(final FluidStack f) {
+        return new Ingredient.Fluid(
+            f.getFluid()
+                .getName());
+    }
+
+    private static String itemName(final ItemStack s) {
         final String id = Item.itemRegistry.getNameForObject(s.getItem());
         if (CIRCUIT.equals(id)) return "#" + s.getItemDamage();
-        try {
-            return s.getDisplayName();
-        } catch (final RuntimeException e) {
-            return id + ":" + s.getItemDamage();
-        }
+        return displayName(s);
     }
 
     /** "Nitric Acid, Nitric Oxide": up to two outputs, which is how players tell recipes apart. */
@@ -364,27 +496,5 @@ public final class GTChannelAnalyzer {
         } catch (final RuntimeException e) {
             return String.valueOf(s);
         }
-    }
-
-    @Nullable
-    private static GTRecipe recipeOf(final Node node) {
-        final TemplateRecipeHandler.CachedRecipe cached = cachedOf(node);
-        return cached instanceof final CachedDefaultRecipe gt ? gt.mRecipe : null;
-    }
-
-    @Nullable
-    private static RecipeMap<?> mapOf(final Node node) {
-        if (node.recipeId == null) return null;
-        final RecipeHandlerRef ref = RecipeHandlerRef.of(node.recipeId);
-        return ref != null && ref.handler instanceof final GTNEIDefaultHandler gth ? gth.getRecipeMap() : null;
-    }
-
-    @Nullable
-    private static TemplateRecipeHandler.CachedRecipe cachedOf(final Node node) {
-        if (node.recipeId == null) return null;
-        final RecipeHandlerRef ref = RecipeHandlerRef.of(node.recipeId);
-        if (ref == null || !(ref.handler instanceof final GTNEIDefaultHandler gth)) return null;
-        final List<TemplateRecipeHandler.CachedRecipe> recipes = RecipeHandlerAccess.getArecipes(gth);
-        return ref.recipeIndex >= 0 && ref.recipeIndex < recipes.size() ? recipes.get(ref.recipeIndex) : null;
     }
 }

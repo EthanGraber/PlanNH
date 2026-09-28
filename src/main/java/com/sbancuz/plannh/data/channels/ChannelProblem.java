@@ -1,6 +1,7 @@
 package com.sbancuz.plannh.data.channels;
 
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -8,67 +9,117 @@ import java.util.Set;
 import javax.annotation.Nonnull;
 
 /**
- * The input to {@link ChannelSolver}: the plan recipes run by one machine type, and every way another
- * recipe in the machine's recipe map could run in their place.
- * <p>
- * Catalysts are the inputs a recipe needs present but doesn't use up: its programmed circuit, or a
- * lens, mold and the like. They are opaque string keys here; a recipe's {@code catalysts} is the set it
- * needs, empty for circuitless recipes. The machine finds recipes with the same catalysts in the same
- * check, so everything about ordering is decided per catalyst set, not per recipe. This class knows
- * nothing about Minecraft, so the solver can be tested headless.
+ * The input to {@link ChannelSolver}: the plan recipes one machine runs, and the other recipes that
+ * could run in their place.
  *
- * @param recipes  distinct plan recipes, indexed by position
- * @param hijacks  per recipe (same index), the recipes that could run on its inputs instead
- * @param keyOrder display/tie-break order of catalyst keys (e.g. circuits by number)
+ * @param hijacks   {@link Feed#BATCH} only: per recipe (same index), what can run on its batch
+ * @param intruders {@link Feed#PASSIVE} only: what can run on whatever a channel holds
+ * @param keyOrder  display and tie-break order of catalysts (circuits by number first)
  */
-public record ChannelProblem(@Nonnull List<Recipe> recipes, @Nonnull List<List<Hijack>> hijacks,
-    @Nonnull Comparator<String> keyOrder) {
+public record ChannelProblem(@Nonnull Feed feed, @Nonnull List<Recipe> recipes, @Nonnull List<List<Hijack>> hijacks,
+    @Nonnull List<Intruder> intruders, @Nonnull Comparator<Ingredient.Item> keyOrder) {
+
+    public enum Feed {
+        PASSIVE,
+        BATCH
+    }
 
     public ChannelProblem {
-        if (hijacks.size() != recipes.size()) {
+        if (feed == Feed.BATCH ? !intruders.isEmpty()
+            : hijacks.stream()
+                .anyMatch(h -> !h.isEmpty())) {
+            throw new IllegalArgumentException("hijacks are for batch feeds, intruders for passive ones");
+        }
+        if (feed == Feed.BATCH && hijacks.size() != recipes.size()) {
             throw new IllegalArgumentException("need one hijack list per recipe");
         }
-        for (int i = 0; i < recipes.size(); i++) {
-            final Set<String> catalysts = recipes.get(i)
-                .catalysts();
+        for (int i = 0; i < hijacks.size(); i++) {
             for (final Hijack h : hijacks.get(i)) {
-                if (catalysts.containsAll(h.needs())) {
-                    throw new IllegalArgumentException(
-                        "recipe " + i + " is hijacked with only its own catalysts present; report it, don't solve it");
+                if (recipes.get(i)
+                    .catalysts()
+                    .containsAll(h.needs())) {
+                    throw new IllegalArgumentException("recipe " + i + " is hijacked in a channel of its own");
+                }
+            }
+        }
+        for (final Intruder x : intruders) {
+            for (int i = 0; i < recipes.size(); i++) {
+                if (i != x.owner() && x.metBy(
+                    recipes.get(i)
+                        .held())) {
+                    throw new IllegalArgumentException("recipe " + i + " is intruded on in a channel of its own");
                 }
             }
         }
     }
 
     /**
-     * @param catalysts   the catalysts this recipe needs present; empty for a circuitless recipe
-     * @param fluidInputs distinct fluid inputs, which sizes the fluid hatches
-     * @param needsBus    whether it has any item input or catalyst
+     * @param catalysts what the recipe needs present; empty for circuitless
+     * @param inputs    what it uses up, items and fluids
      */
-    public record Recipe(@Nonnull Set<String> catalysts, int fluidInputs, boolean needsBus) {}
+    public record Recipe(@Nonnull Set<Ingredient.Item> catalysts, @Nonnull Set<Ingredient> inputs) {
+
+        public int fluidInputs() {
+            return (int) inputs.stream()
+                .filter(i -> i instanceof Ingredient.Fluid)
+                .count();
+        }
+
+        public boolean needsBus() {
+            return !catalysts.isEmpty() || inputs.stream()
+                .anyMatch(i -> i instanceof Ingredient.Item);
+        }
+
+        public Set<Ingredient> held() {
+            final Set<Ingredient> out = new HashSet<>(inputs);
+            out.addAll(catalysts);
+            return out;
+        }
+    }
 
     /**
-     * Another recipe B that can run on a plan recipe's inputs once its catalysts are present. Only
-     * hijacks that depend on the channel's contents belong here; ones that happen with nothing but the
-     * victim's own catalysts, or that are harmless exact multiples, are the caller's to report.
+     * Another recipe B that runs on a plan recipe's batch once its catalysts are present. Ones that
+     * need only the victim's own catalysts, and harmless exact multiples, are for the caller to report.
      *
-     * @param needs      catalyst keys B needs present: its own catalysts plus any plan catalyst it
-     *                   consumes
-     * @param fluidsOnly B also runs on the victim's fluids alone, without its items; only such hijacks
-     *                   cross into another colored bus
-     * @param planRecipe index of the plan recipe B is, or -1. A plan recipe runs for real, so the
-     *                   controller caches it and retries it before any circuit order
+     * @param needs      the catalysts B needs present, which is also the check B is found in
+     * @param fluidsOnly B also runs on the batch's fluids alone, so it can reach across colors
+     * @param planRecipe index of the plan recipe B is, or -1; the machine retries its last recipe
+     *                   before any circuit order
      */
-    public record Hijack(@Nonnull Set<String> needs, boolean fluidsOnly, int planRecipe) {}
+    public record Hijack(@Nonnull Set<Ingredient.Item> needs, boolean fluidsOnly, int planRecipe) {}
 
-    /** Orders catalyst sets: circuitless first, then by their catalysts in {@link #keyOrder}. */
-    public Comparator<Set<String>> catalystOrder() {
+    /**
+     * A recipe that runs on its own once a passive channel holds its ingredients.
+     *
+     * @param needs one set per ingredient, any of which will do
+     * @param owner the plan recipe it is, or is an exact multiple of: harmless wherever that recipe is.
+     *              -1 for none
+     */
+    public record Intruder(@Nonnull List<Set<Ingredient>> needs, int owner) {
+
+        public boolean metBy(final Set<? extends Ingredient> held) {
+            for (final Set<Ingredient> any : needs) {
+                boolean met = false;
+                for (final Ingredient i : any) {
+                    if (held.contains(i)) {
+                        met = true;
+                        break;
+                    }
+                }
+                if (!met) return false;
+            }
+            return true;
+        }
+    }
+
+    /** Circuitless first, then by catalysts in {@link #keyOrder}. */
+    public Comparator<Set<Ingredient.Item>> catalystOrder() {
         return (a, b) -> {
             if (a.isEmpty() || b.isEmpty()) return Boolean.compare(!a.isEmpty(), !b.isEmpty());
-            final Iterator<String> ia = a.stream()
+            final Iterator<Ingredient.Item> ia = a.stream()
                 .sorted(keyOrder)
                 .iterator();
-            final Iterator<String> ib = b.stream()
+            final Iterator<Ingredient.Item> ib = b.stream()
                 .sorted(keyOrder)
                 .iterator();
             while (ia.hasNext() && ib.hasNext()) {
