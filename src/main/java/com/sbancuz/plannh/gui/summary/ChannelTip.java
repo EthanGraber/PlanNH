@@ -7,7 +7,7 @@ import com.cleanroommc.modularui.api.drawable.IKey;
 import com.cleanroommc.modularui.screen.RichTooltip;
 import com.sbancuz.plannh.data.channels.ChannelSolver;
 
-/** Text and tooltip styling shared by the channel rows, so their tooltips read alike. */
+/** Text and tooltip styling shared by the channel rows. */
 final class ChannelTip {
 
     static final String KEY = "plannh.summary.channels.";
@@ -24,7 +24,6 @@ final class ChannelTip {
         return tr(key + (n == 1 ? ".one" : ".many"), n);
     }
 
-    /** The lang key stem naming a layout. */
     static String layout(final ChannelSolver.Mode mode) {
         return "layout." + switch (mode) {
             case NONE -> "separate";

@@ -23,19 +23,12 @@ import org.ojalgo.optimisation.Variable;
 import org.ojalgo.optimisation.integer.IntegerStrategy;
 import org.ojalgo.type.context.NumberContext;
 
-import com.sbancuz.plannh.data.channels.ChannelProblem.Feed;
 import com.sbancuz.plannh.data.flowchart.balancer.Budget;
 
 /**
- * Splits one machine's plan recipes into the fewest channels (isolated input groups) where nothing
- * else can run on their inputs, then picks the split with the fewest input blocks.
- * <p>
- * Checks follow MTEMultiBlockBase#doCheckRecipe: crafting input buffer slots, then each color black to
- * white (uncolored parts join every color), and within one check the last recipe, GT's lookup cache,
- * then the lookup itself. Circuitless recipes can't be given priority, so they are always checked last.
- * <p>
- * Each pass is an ILP over recipe-to-channel assignments. Which recipes may share a channel is
- * decided by {@link #checkOrder}; the ILP learns it lazily, as a cut for each rejected channel.
+ * Splits one machine's plan recipes into the fewest channels where nothing else can run, then the
+ * fewest input blocks. Each pass is an ILP; {@link #checkOrder} decides which recipes may share, and
+ * each channel it rejects becomes a cut. Check order follows MTEMultiBlockBase#doCheckRecipe.
  */
 public final class ChannelSolver {
 
@@ -102,10 +95,7 @@ public final class ChannelSolver {
         return new int[] { quad + (rest > 0 ? 1 : 0), 0 };
     }
 
-    /**
-     * Hatches are sized for the recipe with the most fluids. {@link Mode#COLOR} needs a bus per
-     * catalyst set, plus one for circuitless recipes with items.
-     */
+    /** Hatches fit the recipe with the most fluids; {@link Mode#COLOR} needs a bus per catalyst set. */
     public static Parts parts(final ChannelProblem p, final Collection<Integer> members, final Mode mode) {
         int fluids = 0;
         final Set<Object> buses = new HashSet<>();
@@ -140,9 +130,8 @@ public final class ChannelSolver {
 
     /**
      * @param order null when the channel is invalid
-     * @param fixes for an invalid channel, one set per problem: the recipes whose joining would lift
-     *              it. An empty set means nothing can. Adding recipes never lifts a problem otherwise,
-     *              which is what makes the solver's cuts sound.
+     * @param fixes per reason it is invalid, the recipes whose joining would lift it; empty when none
+     *              can. Nothing else lifts a reason, which keeps the cuts sound.
      */
     record Verdict(@Nullable List<Set<Ingredient.Item>> order, @Nonnull List<Set<Integer>> fixes) {
 
@@ -163,11 +152,14 @@ public final class ChannelSolver {
         final List<Set<Ingredient.Item>> sets = new ArrayList<>(present);
         sets.sort(p.catalystOrder());
         if (mode == Mode.COLOR && sets.size() > COLORS) return Verdict.NEVER;
-        return p.feed() == Feed.BATCH ? batch(p, memberSet, sets, mode) : passive(p, memberSet, sets, mode);
+        return switch (p.conflicts()) {
+            case ChannelProblem.Batch b -> batch(p, b, memberSet, sets, mode);
+            case ChannelProblem.Passive x -> passive(p, x, memberSet, sets, mode);
+        };
     }
 
-    private static Verdict batch(final ChannelProblem p, final Set<Integer> members,
-        final List<Set<Ingredient.Item>> sets, final Mode mode) {
+    private static Verdict batch(final ChannelProblem p, final ChannelProblem.Batch conflicts,
+        final Set<Integer> members, final List<Set<Ingredient.Item>> sets, final Mode mode) {
         final Set<Ingredient.Item> catalysts = new HashSet<>();
         for (final Set<Ingredient.Item> s : sets) catalysts.addAll(s);
         // An edge A -> B: A's catalysts must be checked before B's
@@ -179,7 +171,7 @@ public final class ChannelSolver {
             final Set<Ingredient.Item> src = p.recipes()
                 .get(victim)
                 .catalysts();
-            for (final ChannelProblem.Hijack h : p.hijacks()
+            for (final ChannelProblem.Hijack h : conflicts.hijacks()
                 .get(victim)) {
                 if (mode == Mode.COLOR) {
                     // B runs from any bus holding its catalysts, seeing only the batch's fluids
@@ -212,10 +204,9 @@ public final class ChannelSolver {
         return new Verdict(mode == Mode.NONE ? sorted : circuitlessLast(sorted), List.of());
     }
 
-    private static Verdict passive(final ChannelProblem p, final Set<Integer> members,
-        final List<Set<Ingredient.Item>> sets, final Mode mode) {
-        // Where a recipe could find its ingredients: each colored bus with the shared fluids, or the
-        // whole channel
+    private static Verdict passive(final ChannelProblem p, final ChannelProblem.Passive conflicts,
+        final Set<Integer> members, final List<Set<Ingredient.Item>> sets, final Mode mode) {
+        // Where a recipe could find its ingredients: each colored bus plus the shared fluids, or the channel
         final List<Set<Ingredient>> places = new ArrayList<>();
         if (mode == Mode.COLOR) {
             final Set<Ingredient> fluids = new HashSet<>();
@@ -240,7 +231,7 @@ public final class ChannelSolver {
             places.add(held);
         }
         final List<Set<Integer>> fixes = new ArrayList<>();
-        for (final ChannelProblem.Intruder x : p.intruders()) {
+        for (final ChannelProblem.Intruder x : conflicts.intruders()) {
             if (members.contains(x.owner())) continue;
             for (final Set<Ingredient> place : places) {
                 if (!x.metBy(place)) continue;
@@ -384,11 +375,7 @@ public final class ChannelSolver {
             return split != null;
         }
 
-        /**
-         * Ties between splits with the same counts are common, and which one the ILP returns depends
-         * on its internals. Fixing each recipe in turn to the lowest channel any optimal split still
-         * allows picks the same split every time.
-         */
+        /** Settles ties the same way every time: each recipe in turn goes in its lowest possible channel. */
         private void canonicalize() {
             final int k = best.size();
             final int cap = blocks(best);
@@ -435,10 +422,7 @@ public final class ChannelSolver {
             return out;
         }
 
-        /**
-         * Solves and cuts until the ILP's answer holds only valid channels. Null if it stops first, or
-         * claims something worse than {@code incumbent}, a value some valid split already reaches.
-         */
+        /** Solves and cuts until the answer is valid; null if it stops first or claims worse than {@code incumbent}. */
         @Nullable
         private List<List<Integer>> settle(final Supplier<Model> build, final double incumbent) {
             while (!budget.expired()) {
@@ -567,11 +551,7 @@ public final class ChannelSolver {
                 .catalysts();
         }
 
-        /**
-         * Channel c opens only after channel c-1 has a recipe, so each split has one labeling. Pass 1
-         * minimizes channels. Pass 2 keeps at most k and minimizes blocks. The canonical pass also caps
-         * blocks, fixes recipes before {@code recipe} to their labels and minimizes its channel.
-         */
+        /** Channel c opens only after channel c-1 has a recipe, so each split has one labeling. */
         private final class Model {
 
             final ExpressionsBasedModel m = new ExpressionsBasedModel();

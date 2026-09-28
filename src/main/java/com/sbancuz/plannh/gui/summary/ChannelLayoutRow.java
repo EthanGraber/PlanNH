@@ -13,10 +13,7 @@ import com.sbancuz.plannh.data.channels.ChannelSolver;
 import com.sbancuz.plannh.data.flowchart.Summary;
 import com.sbancuz.plannh.gui.PlannhColors;
 
-/**
- * One channel: its dye and catalysts in check order. In color mode a channel is a whole machine with a
- * bus per catalyst set, so it lists each bus in its own color, and is labeled a machine.
- */
+/** One channel: its dye and catalysts in check order. In color mode, a machine with a line per bus. */
 final class ChannelLayoutRow extends SummaryFlow {
 
     private static final int CHIP = 7;
@@ -65,8 +62,7 @@ final class ChannelLayoutRow extends SummaryFlow {
 
         tooltipStatic(t -> {
             ChannelTip.title(t, title);
-            // Which blocks to dye: every bus in color mode (hatches stay uncolored), or the channel's
-            // whole bus and hatch group when it shares a machine with other channels
+            // What to dye: each bus in color mode, else the whole group if other channels share the machine
             if (color) ChannelTip.body(t, tr("dye.buses"));
             else if (g.of() > 1) ChannelTip.body(
                 t,

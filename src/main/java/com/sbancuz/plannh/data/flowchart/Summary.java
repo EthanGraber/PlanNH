@@ -1,6 +1,7 @@
 package com.sbancuz.plannh.data.flowchart;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -41,10 +42,9 @@ public final class Summary extends GraphData {
         CHOICES("plannh.summary.title.choices"),
         PROPERTIES("plannh.summary.title.properties"),
         MACHINE_COUNTS("plannh.summary.title.machine_counts"),
+        CHANNELS("plannh.summary.title.channels"),
         MESSAGES("plannh.summary.title.messages"),
-        HELP("plannh.summary.title.help"),
-        // Appended so saved fold bits keep their meaning; the default order places it by MESSAGES
-        CHANNELS("plannh.summary.title.channels");
+        HELP("plannh.summary.title.help");
 
         public static final Section[] VALUES = Section.values();
 
@@ -183,11 +183,11 @@ public final class Summary extends GraphData {
         }
 
         /**
-         * One machine pool's layout totals under the layout {@code mode} picked; {@code dedicated} is the
-         * one-machine-per-catalyst baseline.
+         * One machine pool's totals under the layout {@code mode}.
          *
-         * @param group    the machine group's name, or null for a machine type's ungrouped nodes
-         * @param capacity the machine group's machine count, 0 for no limit
+         * @param group     null for ungrouped nodes
+         * @param capacity  0 for no limit
+         * @param dedicated channels with one per catalyst set, the no-sharing baseline
          */
         record ChannelMachine(String machine, @Nullable String group, int capacity, ChannelSolver.Mode mode,
             int channels, int machines, ChannelSolver.Parts parts, int dedicated, boolean channelsMinimal,
@@ -199,10 +199,7 @@ public final class Summary extends GraphData {
             }
         }
 
-        /**
-         * One channel of {@code of}, or a whole machine in color mode: its catalyst sets in check order
-         * (empty string for circuitless) and the dye of each.
-         */
+        /** Channel {@code index} of {@code of}: its catalyst sets in check order ("" for circuitless). */
         record ChannelLayout(int index, int of, ChannelSolver.Mode mode, List<String> catalysts,
             List<ChannelReport.Dye> dyes, ChannelSolver.Parts parts, List<String> recipes) implements Line<Object> {
 
@@ -365,10 +362,7 @@ public final class Summary extends GraphData {
     }
 
     private static int[] defaultSectionOrder() {
-        final List<Section> order = new ArrayList<>(List.of(Section.VALUES));
-        order.remove(Section.CHANNELS);
-        order.add(order.indexOf(Section.MESSAGES), Section.CHANNELS);
-        return order.stream()
+        return Arrays.stream(Section.VALUES)
             .mapToInt(Section::ordinal)
             .toArray();
     }
@@ -581,11 +575,7 @@ public final class Summary extends GraphData {
         return solved.auto().openGates > 0 ? BalanceView.toLineChoices(graph, alternatives) : List.of();
     }
 
-    /**
-     * The settings row, then per machine pool its layout under the chosen mode and what shaped it. Only
-     * a chart or feed change reruns the analysis; a mode switch rereads it. Nothing at all without an
-     * analyzer, which hides the section.
-     */
+    /** Empty without an analyzer, which hides the section. Only a chart or feed change reruns it. */
     private List<Line<?>> channelLines(final Graph graph) {
         final ChannelReport.Analyzer analyzer = ChannelReport.analyzer();
         if (analyzer == null) return List.of();

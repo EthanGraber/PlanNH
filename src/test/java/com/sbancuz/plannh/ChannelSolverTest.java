@@ -113,7 +113,8 @@ class ChannelSolverTest {
         }
 
         ChannelProblem build() {
-            return new ChannelProblem(feed, recipes, feed == Feed.BATCH ? hijacks : List.of(), intruders, KEYS);
+            return feed == Feed.BATCH ? ChannelProblem.batch(recipes, hijacks, KEYS)
+                : ChannelProblem.passive(recipes, intruders, KEYS);
         }
 
         Map<Mode, Solution> solveAll() {
@@ -350,13 +351,6 @@ class ChannelSolverTest {
     void intrudersOneRecipeFeedsAreRejected() {
         final P p = passive().uses(cats("#1"), Set.of(fluid("water")))
             .intruder(-1, cat("#1"), fluid("water"));
-        assertThrows(IllegalArgumentException.class, p::build);
-    }
-
-    @Test
-    void feedsTakeOnlyTheirOwnKindOfConflict() {
-        final P p = batch().circuit("#1")
-            .intruder(-1, cat("#1"));
         assertThrows(IllegalArgumentException.class, p::build);
     }
 

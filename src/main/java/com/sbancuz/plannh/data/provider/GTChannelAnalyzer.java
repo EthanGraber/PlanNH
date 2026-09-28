@@ -42,13 +42,9 @@ import gregtech.api.util.GTRecipe;
 import gregtech.api.util.GTUtility;
 
 /**
- * Finds what else could run on a chart's GT recipes, with GT's own matcher (so ore dictionary,
- * wildcards and NBT behave as in the machine), and lays out channels for it. Queries never write GT's
- * lookup cache.
- * <p>
- * A batch feed queries each plan recipe's batch plus every plan catalyst, and its fluids alone plus
- * those catalysts (what another color sees through uncolored hatches). A passive feed queries
- * everything the pool's recipes use, at any amount, since leftovers mix.
+ * Finds what else could run on a chart's GT recipes, using GT's own matcher, and lays out channels.
+ * Batch: each recipe's batch plus the pool's catalysts, and its fluids alone (what another color sees).
+ * Passive: everything the pool's recipes use, at any amount.
  */
 public final class GTChannelAnalyzer {
 
@@ -58,7 +54,6 @@ public final class GTChannelAnalyzer {
 
     private record Entry(GTRecipe recipe, RecipeMap<?> map, List<UUID> nodeIds) {}
 
-    /** The nodes one pool of machines runs. */
     private static final class Pool {
 
         final String handler;
@@ -223,12 +218,11 @@ public final class GTChannelAnalyzer {
             }
             hijacks.add(own);
         }
-        return new ChannelProblem(Feed.BATCH, recipes, hijacks, List.of(), KEY_ORDER);
+        return ChannelProblem.batch(recipes, hijacks, KEY_ORDER);
     }
 
     private static ChannelProblem passiveProblem(final List<Entry> entries, final List<ChannelProblem.Recipe> recipes,
         final Map<GTRecipe, Integer> planIndex, final Set<RecipeMap<?>> maps, final List<Finding> findings) {
-        // Everything the pool's recipes bring, by key, as the stacks to query with
         final Map<Ingredient.Item, ItemStack> items = new LinkedHashMap<>();
         final Map<Ingredient.Fluid, FluidStack> fluids = new LinkedHashMap<>();
         for (final Entry e : entries) {
@@ -285,7 +279,7 @@ public final class GTChannelAnalyzer {
             intruders.add(intruder);
             if (owner < 0) findings.add(new Finding(Kind.CONFLICT, -1, label(x), needs, false, "", x.mEUt, 0));
         }
-        return new ChannelProblem(Feed.PASSIVE, recipes, List.of(), intruders, KEY_ORDER);
+        return ChannelProblem.passive(recipes, intruders, KEY_ORDER);
     }
 
     private static Finding tolerated(final int victim, final GTRecipe a, final GTRecipe b, final long[] k,

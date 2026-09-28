@@ -151,11 +151,7 @@ public class Node {
         return availableExtractors.getFirst();
     }
 
-    /**
-     * The name of this node's NEI recipe handler, which makes two nodes the same machine type. Read off
-     * the handler, since {@code RecipeId}'s getter for it differs across NEI versions. Empty when the
-     * handler is gone.
-     */
+    /** This node's NEI recipe handler name, i.e. its machine type; empty when the handler is gone. */
     public String handlerName() {
         if (recipeId == null) return "";
         final IRecipeHandler handler = RecipeHandlerRef.of(recipeId).handler;

@@ -13,7 +13,6 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 import com.sbancuz.plannh.data.channels.ChannelProblem;
-import com.sbancuz.plannh.data.channels.ChannelProblem.Feed;
 import com.sbancuz.plannh.data.channels.ChannelReport;
 import com.sbancuz.plannh.data.channels.ChannelSolver;
 import com.sbancuz.plannh.data.channels.ChannelSolver.Mode;
@@ -78,12 +77,8 @@ class ChannelSummaryTest {
         final List<ChannelProblem.Recipe> recipes = List.of(
             new ChannelProblem.Recipe(Set.of(circuit(1)), Set.of(new Ingredient.Fluid("a"))),
             new ChannelProblem.Recipe(Set.of(circuit(2)), Set.of(new Ingredient.Fluid("b"))));
-        final ChannelProblem problem = new ChannelProblem(
-            Feed.BATCH,
-            recipes,
-            List.of(hijacks, List.of()),
-            List.of(),
-            Comparator.comparingInt(Ingredient.Item::meta));
+        final ChannelProblem problem = ChannelProblem
+            .batch(recipes, List.of(hijacks, List.of()), Comparator.comparingInt(Ingredient.Item::meta));
         final Map<Mode, ChannelSolver.Solution> solutions = new EnumMap<>(Mode.class);
         for (final Mode mode : Mode.values()) solutions.put(mode, ChannelSolver.solve(problem, mode));
         return new ChannelReport.MachineReport("handler", "LCR", null, 0, List.of(), Map.of(), solutions, List.of(), 2);

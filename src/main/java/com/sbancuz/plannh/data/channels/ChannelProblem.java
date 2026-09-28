@@ -9,45 +9,63 @@ import java.util.Set;
 import javax.annotation.Nonnull;
 
 /**
- * The input to {@link ChannelSolver}: the plan recipes one machine runs, and the other recipes that
- * could run in their place.
+ * The input to {@link ChannelSolver}: the plan recipes one machine runs, and what else could run in
+ * their place.
  *
- * @param hijacks   {@link Feed#BATCH} only: per recipe (same index), what can run on its batch
- * @param intruders {@link Feed#PASSIVE} only: what can run on whatever a channel holds
- * @param keyOrder  display and tie-break order of catalysts (circuits by number first)
+ * @param keyOrder display and tie-break order of catalysts (circuits by number first)
  */
-public record ChannelProblem(@Nonnull Feed feed, @Nonnull List<Recipe> recipes, @Nonnull List<List<Hijack>> hijacks,
-    @Nonnull List<Intruder> intruders, @Nonnull Comparator<Ingredient.Item> keyOrder) {
+public record ChannelProblem(@Nonnull List<Recipe> recipes, @Nonnull Conflicts conflicts,
+    @Nonnull Comparator<Ingredient.Item> keyOrder) {
 
     public enum Feed {
         PASSIVE,
         BATCH
     }
 
+    /** What else can run, which depends on the feed. */
+    public sealed interface Conflicts permits Batch,Passive {
+    }
+
+    /** @param hijacks per recipe (same index), what can run on its batch */
+    public record Batch(@Nonnull List<List<Hijack>> hijacks) implements Conflicts {}
+
+    /** @param intruders what can run on whatever a channel holds */
+    public record Passive(@Nonnull List<Intruder> intruders) implements Conflicts {}
+
+    public static ChannelProblem batch(final List<Recipe> recipes, final List<List<Hijack>> hijacks,
+        final Comparator<Ingredient.Item> keyOrder) {
+        return new ChannelProblem(recipes, new Batch(hijacks), keyOrder);
+    }
+
+    public static ChannelProblem passive(final List<Recipe> recipes, final List<Intruder> intruders,
+        final Comparator<Ingredient.Item> keyOrder) {
+        return new ChannelProblem(recipes, new Passive(intruders), keyOrder);
+    }
+
+    /** Rejects conflicts no channel avoids: those are the caller's to report. */
     public ChannelProblem {
-        if (feed == Feed.BATCH ? !intruders.isEmpty()
-            : hijacks.stream()
-                .anyMatch(h -> !h.isEmpty())) {
-            throw new IllegalArgumentException("hijacks are for batch feeds, intruders for passive ones");
-        }
-        if (feed == Feed.BATCH && hijacks.size() != recipes.size()) {
-            throw new IllegalArgumentException("need one hijack list per recipe");
-        }
-        for (int i = 0; i < hijacks.size(); i++) {
-            for (final Hijack h : hijacks.get(i)) {
-                if (recipes.get(i)
-                    .catalysts()
-                    .containsAll(h.needs())) {
-                    throw new IllegalArgumentException("recipe " + i + " is hijacked in a channel of its own");
+        switch (conflicts) {
+            case Batch(final List<List<Hijack>> hijacks) -> {
+                if (hijacks.size() != recipes.size()) throw new IllegalArgumentException("one hijack list per recipe");
+                for (int i = 0; i < hijacks.size(); i++) {
+                    for (final Hijack h : hijacks.get(i)) {
+                        if (recipes.get(i)
+                            .catalysts()
+                            .containsAll(h.needs())) {
+                            throw new IllegalArgumentException("recipe " + i + " is hijacked in a channel of its own");
+                        }
+                    }
                 }
             }
-        }
-        for (final Intruder x : intruders) {
-            for (int i = 0; i < recipes.size(); i++) {
-                if (i != x.owner() && x.metBy(
-                    recipes.get(i)
-                        .held())) {
-                    throw new IllegalArgumentException("recipe " + i + " is intruded on in a channel of its own");
+            case Passive(final List<Intruder> intruders) -> {
+                for (final Intruder x : intruders) {
+                    for (int i = 0; i < recipes.size(); i++) {
+                        if (i != x.owner() && x.metBy(
+                            recipes.get(i)
+                                .held())) {
+                            throw new IllegalArgumentException("recipe " + i + " is intruded on in a channel of its own");
+                        }
+                    }
                 }
             }
         }
@@ -55,7 +73,7 @@ public record ChannelProblem(@Nonnull Feed feed, @Nonnull List<Recipe> recipes, 
 
     /**
      * @param catalysts what the recipe needs present; empty for circuitless
-     * @param inputs    what it uses up, items and fluids
+     * @param inputs    what it uses up
      */
     public record Recipe(@Nonnull Set<Ingredient.Item> catalysts, @Nonnull Set<Ingredient> inputs) {
 
@@ -78,37 +96,28 @@ public record ChannelProblem(@Nonnull Feed feed, @Nonnull List<Recipe> recipes, 
     }
 
     /**
-     * Another recipe B that runs on a plan recipe's batch once its catalysts are present. Ones that
-     * need only the victim's own catalysts, and harmless exact multiples, are for the caller to report.
+     * A recipe B that runs on a plan recipe's batch once its catalysts are present.
      *
-     * @param needs      the catalysts B needs present, which is also the check B is found in
-     * @param fluidsOnly B also runs on the batch's fluids alone, so it can reach across colors
-     * @param planRecipe index of the plan recipe B is, or -1; the machine retries its last recipe
-     *                   before any circuit order
+     * @param needs      B's catalysts, which also name the check B is found in
+     * @param fluidsOnly B also runs on the batch's fluids alone, so it reaches across colors
+     * @param planRecipe the plan recipe B is, or -1; the machine retries its last recipe first
      */
     public record Hijack(@Nonnull Set<Ingredient.Item> needs, boolean fluidsOnly, int planRecipe) {}
 
     /**
-     * A recipe that runs on its own once a passive channel holds its ingredients.
+     * A recipe that runs once a passive channel holds its ingredients.
      *
-     * @param needs one set per ingredient, any of which will do
-     * @param owner the plan recipe it is, or is an exact multiple of: harmless wherever that recipe is.
-     *              -1 for none
+     * @param ingredients per ingredient, the keys that satisfy it (ore dictionary, alternative fluids)
+     * @param owner       the plan recipe it is or multiplies, harmless where that recipe is; -1 for none
      */
-    public record Intruder(@Nonnull List<Set<Ingredient>> needs, int owner) {
+    public record Intruder(@Nonnull List<Set<Ingredient>> ingredients, int owner) {
 
+        /** Every ingredient is present in one of its forms. */
         public boolean metBy(final Set<? extends Ingredient> held) {
-            for (final Set<Ingredient> any : needs) {
-                boolean met = false;
-                for (final Ingredient i : any) {
-                    if (held.contains(i)) {
-                        met = true;
-                        break;
-                    }
-                }
-                if (!met) return false;
-            }
-            return true;
+            return ingredients.stream()
+                .allMatch(
+                    forms -> forms.stream()
+                        .anyMatch(held::contains));
         }
     }
 

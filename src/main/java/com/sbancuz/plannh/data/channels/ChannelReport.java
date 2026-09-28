@@ -14,12 +14,7 @@ import com.sbancuz.plannh.data.channels.ChannelSolver.Mode;
 import com.sbancuz.plannh.data.channels.ChannelSolver.Solution;
 import com.sbancuz.plannh.data.flowchart.Graph;
 
-/**
- * Which plan recipes can share a machine, per machine pool, in every {@link Mode}. Built by an
- * {@link Analyzer} from the live recipe maps; holds only display data and solver results.
- *
- * @param dyes the 16 bus colors in check order
- */
+/** Per machine pool, the channel layout in every {@link Mode}, plus what the summary displays. */
 public record ChannelReport(@Nonnull List<MachineReport> machines, @Nonnull List<Dye> dyes) {
 
     /** Installed by the GT provider when GregTech is present. */
@@ -44,32 +39,27 @@ public record ChannelReport(@Nonnull List<MachineReport> machines, @Nonnull List
     public record Dye(int rgb, @Nonnull String name) {}
 
     /**
-     * One pool of machines: a machine group, or the chart's ungrouped nodes of one machine type.
+     * A machine group, or the chart's ungrouped nodes of one machine type.
      *
-     * @param handler   NEI recipe handler name, the machine type
-     * @param group     the machine group's name, or null for ungrouped nodes
-     * @param capacity  the machine group's machine count, or 0 for no limit
-     * @param recipes   distinct plan recipes, indexed like the solver's
-     * @param names     display names of the ingredients the findings and catalysts mention
+     * @param group     null for ungrouped nodes
+     * @param capacity  0 for no limit
      * @param dedicated channels with one per catalyst set, the no-sharing baseline
      */
     public record MachineReport(@Nonnull String handler, @Nonnull String machine, @Nullable String group, int capacity,
         @Nonnull List<PlanRecipe> recipes, @Nonnull Map<Ingredient, String> names,
         @Nonnull Map<Mode, Solution> solutions, @Nonnull List<Finding> findings, int dedicated) {
 
-        /**
-         * The layout to show: {@link Mode#NONE} without priority, else whichever ordered layout needs
-         * fewer machines, then fewer blocks, then circuit order (one bus).
-         */
+        /** Without priority, {@link Mode#NONE}; else the ordered layout with fewer machines, then blocks. */
         public Solution solution(final boolean priority) {
             if (!priority) return solutions.get(Mode.NONE);
             final Solution circuit = solutions.get(Mode.CIRCUIT);
             final Solution color = solutions.get(Mode.COLOR);
             if (color.machines() != circuit.machines()) return color.machines() < circuit.machines() ? color : circuit;
-            return color.total()
-                .blocks()
-                < circuit.total()
-                    .blocks() ? color : circuit;
+            final int colorBlocks = color.total()
+                .blocks();
+            final int circuitBlocks = circuit.total()
+                .blocks();
+            return colorBlocks < circuitBlocks ? color : circuit;
         }
 
         /** "#3 + Ruby Lens"; empty for circuitless. */
@@ -102,19 +92,14 @@ public record ChannelReport(@Nonnull List<MachineReport> machines, @Nonnull List
     public enum Kind {
         CONFLICT,
         TOLERATED,
-        /**
-         * Theoretically shouldn't exist, but in practice there are a few GT recpies that always conflict with each other and have no disambiguator.
-         */
+        /** Shouldn't exist, but a few GT recipes always conflict and have nothing to tell them apart. */
         INHERENT
     }
 
     /**
-     * @param victim    the plan recipe it runs in place of, or -1 when it needs several recipes' inputs
-     * @param hijacker  label of the recipe that can run
-     * @param needs     what must be present for it, one set of alternatives per ingredient
-     * @param plan      the hijacker is itself a plan recipe
-     * @param scale     for {@link Kind#TOLERATED}: how many of the plan recipe it is ("64", "1/9")
-     * @param timeRatio its time per unit of output against the plan recipe's, 0 if unknown
+     * @param victim    the plan recipe it replaces, or -1 when it needs several recipes' inputs
+     * @param scale     {@link Kind#TOLERATED} only: how many of the plan recipe it is ("64", "1/9")
+     * @param timeRatio time per unit of output against the plan recipe's, 0 if unknown
      */
     public record Finding(@Nonnull Kind kind, int victim, @Nonnull String hijacker,
         @Nonnull List<Set<Ingredient>> needs, boolean plan, @Nonnull String scale, long eut, double timeRatio) {}
