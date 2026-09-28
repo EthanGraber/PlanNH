@@ -1,7 +1,5 @@
 package com.sbancuz.plannh.gui.summary;
 
-import static com.sbancuz.plannh.gui.summary.ChannelTip.tr;
-
 import net.minecraft.util.StatCollector;
 
 import com.cleanroommc.modularui.api.GuiAxis;
@@ -15,9 +13,7 @@ import com.sbancuz.plannh.data.flowchart.Plan;
 import com.sbancuz.plannh.data.flowchart.Summary;
 
 /** On/off, the priority mode and the feed; each re-derives the rows. */
-final class ChannelControlsRow extends SummaryFlow {
-
-    private static final int GAP = 3;
+final class ChannelControlsRow extends ChannelRow {
 
     private final Summary data;
 
@@ -25,16 +21,16 @@ final class ChannelControlsRow extends SummaryFlow {
         super(GuiAxis.X);
         this.data = data;
 
-        final CycleButtonWidget enabled = button(2).stateOverlay(false, IKey.lang(ChannelTip.KEY + "enabled.off"))
-            .stateOverlay(true, IKey.lang(ChannelTip.KEY + "enabled.on"))
+        final CycleButtonWidget enabled = button(2).stateOverlay(false, IKey.lang(KEY + "enabled.off"))
+            .stateOverlay(true, IKey.lang(KEY + "enabled.on"))
             .value(new BoolValue.Dynamic(data::isChannelsEnabled, val -> {
                 data.setChannelsEnabled(val);
                 refresh();
             }));
         for (int state = 0; state < 2; state++) enabled.tooltip(state, ChannelControlsRow::enabledTooltip);
 
-        final CycleButtonWidget mode = button(2).stateOverlay(false, IKey.lang(ChannelTip.KEY + "mode.separate.button"))
-            .stateOverlay(true, IKey.lang(ChannelTip.KEY + "mode.priority.button"))
+        final CycleButtonWidget mode = button(2).stateOverlay(false, IKey.lang(KEY + "mode.separate.button"))
+            .stateOverlay(true, IKey.lang(KEY + "mode.priority.button"))
             .value(new BoolValue.Dynamic(data::isChannelPriority, val -> {
                 data.setChannelPriority(val);
                 refresh();
@@ -49,7 +45,7 @@ final class ChannelControlsRow extends SummaryFlow {
                 refresh();
             }));
         for (final Feed f : Feed.values()) {
-            feed.stateOverlay(f, IKey.lang(ChannelTip.KEY + feedKey(f) + ".button"));
+            feed.stateOverlay(f, IKey.lang(KEY + feedKey(f) + ".button"));
             feed.tooltip(f.ordinal(), t -> feedTooltip(t, f));
         }
 
@@ -79,29 +75,29 @@ final class ChannelControlsRow extends SummaryFlow {
     }
 
     private static void enabledTooltip(final RichTooltip t) {
-        ChannelTip.title(t, tr("enabled.title"));
-        ChannelTip.body(t, tr("enabled.help"));
-        ChannelTip.footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
+        title(t, tr("enabled.title"));
+        body(t, tr("enabled.help"));
+        footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
     }
 
     private static void modeTooltip(final RichTooltip t, final boolean priority) {
-        ChannelTip.title(t, tr("mode.title"));
-        ChannelTip.gap(t);
-        ChannelTip.option(t, tr("mode.separate.name"), tr("mode.separate.help"), !priority);
-        ChannelTip.gap(t);
-        ChannelTip.option(t, tr("mode.priority.name"), tr("mode.priority.help"), priority);
-        ChannelTip.gap(t);
-        ChannelTip.footer(t, tr("order"));
-        ChannelTip.footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
+        title(t, tr("mode.title"));
+        gap(t);
+        option(t, tr("mode.separate.name"), tr("mode.separate.help"), !priority);
+        gap(t);
+        option(t, tr("mode.priority.name"), tr("mode.priority.help"), priority);
+        gap(t);
+        footer(t, tr("order"));
+        footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
     }
 
     private static void feedTooltip(final RichTooltip t, final Feed current) {
-        ChannelTip.title(t, tr("feed.title"));
+        title(t, tr("feed.title"));
         for (final Feed f : Feed.values()) {
-            ChannelTip.gap(t);
-            ChannelTip.option(t, tr(feedKey(f)), tr(feedKey(f) + ".help"), f == current);
+            gap(t);
+            option(t, tr(feedKey(f)), tr(feedKey(f) + ".help"), f == current);
         }
-        ChannelTip.gap(t);
-        ChannelTip.footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
+        gap(t);
+        footer(t, StatCollector.translateToLocal("plannh.summary.mode.switch_hint"));
     }
 }

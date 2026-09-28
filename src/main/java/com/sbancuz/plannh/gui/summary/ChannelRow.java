@@ -3,28 +3,31 @@ package com.sbancuz.plannh.gui.summary;
 import net.minecraft.util.EnumChatFormatting;
 import net.minecraft.util.StatCollector;
 
+import com.cleanroommc.modularui.api.GuiAxis;
 import com.cleanroommc.modularui.api.drawable.IKey;
 import com.cleanroommc.modularui.screen.RichTooltip;
 import com.sbancuz.plannh.data.channels.ChannelSolver;
 
-/** Text and tooltip styling shared by the channel rows. */
-final class ChannelTip {
+/** A row of the channels section, with the text and tooltip styling the rows share. */
+abstract class ChannelRow extends SummaryFlow {
 
     static final String KEY = "plannh.summary.channels.";
-    private static final int GAP_PX = 3;
+    static final int GAP = 3;
 
-    private ChannelTip() {}
+    ChannelRow(final GuiAxis axis) {
+        super(axis);
+    }
 
-    static String tr(final String key, final Object... args) {
+    protected static String tr(final String key, final Object... args) {
         return StatCollector.translateToLocalFormatted(KEY + key, args);
     }
 
     /** The lang file holds a {@code .one} and a {@code .many} form. */
-    static String plural(final String key, final int n) {
+    protected static String plural(final String key, final int n) {
         return tr(key + (n == 1 ? ".one" : ".many"), n);
     }
 
-    static String layout(final ChannelSolver.Mode mode) {
+    protected static String layout(final ChannelSolver.Mode mode) {
         return "layout." + switch (mode) {
             case NONE -> "separate";
             case CIRCUIT -> "circuit";
@@ -32,39 +35,39 @@ final class ChannelTip {
         };
     }
 
-    static String catalysts(final String name) {
+    protected static String catalysts(final String name) {
         return name.isEmpty() ? tr("circuitless") : name;
     }
 
-    static String parts(final ChannelSolver.Parts p) {
+    protected static String parts(final ChannelSolver.Parts p) {
         return tr("parts", p.buses(), p.quad(), p.normal());
     }
 
-    static void title(final RichTooltip t, final String text) {
+    protected static void title(final RichTooltip t, final String text) {
         t.addLine(
             IKey.str(text)
                 .style(EnumChatFormatting.AQUA, EnumChatFormatting.BOLD));
     }
 
-    static void heading(final RichTooltip t, final String text) {
+    protected static void heading(final RichTooltip t, final String text) {
         t.addLine(
             IKey.str(text)
                 .style(EnumChatFormatting.WHITE, EnumChatFormatting.UNDERLINE));
     }
 
-    static void body(final RichTooltip t, final String text) {
+    protected static void body(final RichTooltip t, final String text) {
         t.addLine(
             IKey.str(text)
                 .style(EnumChatFormatting.GRAY));
     }
 
-    static void warn(final RichTooltip t, final String text) {
+    protected static void warn(final RichTooltip t, final String text) {
         t.addLine(
             IKey.str(text)
                 .style(EnumChatFormatting.GOLD));
     }
 
-    static void item(final RichTooltip t, final String text) {
+    protected static void item(final RichTooltip t, final String text) {
         t.addLine(
             IKey.comp(
                 IKey.str("• ")
@@ -74,7 +77,7 @@ final class ChannelTip {
     }
 
     /** A named choice and what it means; the one in effect is marked. */
-    static void option(final RichTooltip t, final String name, final String help, final boolean current) {
+    protected static void option(final RichTooltip t, final String name, final String help, final boolean current) {
         t.addLine(
             current ? IKey.str("▶ " + name)
                 .style(EnumChatFormatting.GREEN, EnumChatFormatting.BOLD)
@@ -85,13 +88,13 @@ final class ChannelTip {
                 .style(EnumChatFormatting.GRAY));
     }
 
-    static void footer(final RichTooltip t, final String text) {
+    protected static void footer(final RichTooltip t, final String text) {
         t.addLine(
             IKey.str(text)
                 .style(EnumChatFormatting.DARK_GRAY, EnumChatFormatting.ITALIC));
     }
 
-    static void gap(final RichTooltip t) {
-        t.spaceLine(GAP_PX);
+    protected static void gap(final RichTooltip t) {
+        t.spaceLine(GAP);
     }
 }

@@ -1,7 +1,5 @@
 package com.sbancuz.plannh.gui.summary;
 
-import static com.sbancuz.plannh.gui.summary.ChannelTip.tr;
-
 import com.cleanroommc.modularui.api.GuiAxis;
 import com.cleanroommc.modularui.api.drawable.IKey;
 import com.cleanroommc.modularui.drawable.Rectangle;
@@ -12,7 +10,7 @@ import com.sbancuz.plannh.data.flowchart.Summary;
 import com.sbancuz.plannh.gui.PlannhColors;
 
 /** A count of one kind of finding for a machine pool, each listed on hover. */
-final class ChannelFindingsRow extends SummaryFlow {
+final class ChannelFindingsRow extends ChannelRow {
 
     ChannelFindingsRow(final Summary.Line.ChannelFindings f) {
         super(GuiAxis.X);
@@ -33,7 +31,7 @@ final class ChannelFindingsRow extends SummaryFlow {
             .child(
                 new TextWidget<>(
                     IKey.str(
-                        ChannelTip.plural(
+                        plural(
                             kind,
                             f.notes()
                                 .size()))).color(color)
@@ -41,10 +39,10 @@ final class ChannelFindingsRow extends SummaryFlow {
                                     .fullWidth());
 
         tooltipStatic(t -> {
-            ChannelTip.title(t, tr(kind + ".title"));
-            ChannelTip.body(t, tr(kind + ".help"));
-            ChannelTip.gap(t);
-            for (final Summary.ChannelNote n : f.notes()) ChannelTip.item(t, note(f.kind(), n));
+            title(t, tr(kind + ".title"));
+            body(t, tr(kind + ".help"));
+            gap(t);
+            for (final Summary.ChannelNote n : f.notes()) item(t, note(f.kind(), n));
         });
     }
 

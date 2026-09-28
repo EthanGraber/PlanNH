@@ -1,7 +1,5 @@
 package com.sbancuz.plannh.gui.summary;
 
-import static com.sbancuz.plannh.gui.summary.ChannelTip.tr;
-
 import com.cleanroommc.modularui.api.GuiAxis;
 import com.cleanroommc.modularui.api.drawable.IKey;
 import com.cleanroommc.modularui.drawable.Rectangle;
@@ -14,10 +12,9 @@ import com.sbancuz.plannh.data.flowchart.Summary;
 import com.sbancuz.plannh.gui.PlannhColors;
 
 /** One channel: its dye and catalysts in check order. In color mode, a machine with a line per bus. */
-final class ChannelLayoutRow extends SummaryFlow {
+final class ChannelLayoutRow extends ChannelRow {
 
     private static final int CHIP = 7;
-    private static final int GAP = 3;
 
     ChannelLayoutRow(final Summary.Line.ChannelLayout g) {
         super(GuiAxis.Y);
@@ -36,7 +33,7 @@ final class ChannelLayoutRow extends SummaryFlow {
                     line(
                         dye,
                         dye.name() + ": "
-                            + ChannelTip.catalysts(
+                            + catalysts(
                                 g.catalysts()
                                     .get(i)),
                         PlannhColors.SUMMARY_TEXT.getColor()).paddingLeft(SummaryBody.TEXT_X * 2));
@@ -48,7 +45,7 @@ final class ChannelLayoutRow extends SummaryFlow {
                 .size(); i++) {
                 if (i > 0) sb.append(separator);
                 sb.append(
-                    ChannelTip.catalysts(
+                    catalysts(
                         g.catalysts()
                             .get(i)));
             }
@@ -61,22 +58,22 @@ final class ChannelLayoutRow extends SummaryFlow {
         }
 
         tooltipStatic(t -> {
-            ChannelTip.title(t, title);
+            title(t, title);
             // What to dye: each bus in color mode, else the whole group if other channels share the machine
-            if (color) ChannelTip.body(t, tr("dye.buses"));
-            else if (g.of() > 1) ChannelTip.body(
+            if (color) body(t, tr("dye.buses"));
+            else if (g.of() > 1) body(
                 t,
                 tr(
                     "dye.group",
                     g.dyes()
                         .getFirst()
                         .name()));
-            else ChannelTip.body(t, tr("dye.none"));
-            ChannelTip.body(t, ChannelTip.parts(g.parts()));
-            if (g.mode() != ChannelSolver.Mode.NONE) ChannelTip.body(t, tr("order"));
-            ChannelTip.gap(t);
-            ChannelTip.heading(t, tr("recipes"));
-            for (final String r : g.recipes()) ChannelTip.item(t, r);
+            else body(t, tr("dye.none"));
+            body(t, parts(g.parts()));
+            if (g.mode() != ChannelSolver.Mode.NONE) body(t, tr("order"));
+            gap(t);
+            heading(t, tr("recipes"));
+            for (final String r : g.recipes()) item(t, r);
         });
     }
 

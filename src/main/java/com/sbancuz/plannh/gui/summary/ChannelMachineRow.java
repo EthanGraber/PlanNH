@@ -1,8 +1,5 @@
 package com.sbancuz.plannh.gui.summary;
 
-import static com.sbancuz.plannh.gui.summary.ChannelTip.plural;
-import static com.sbancuz.plannh.gui.summary.ChannelTip.tr;
-
 import com.cleanroommc.modularui.api.GuiAxis;
 import com.cleanroommc.modularui.api.drawable.IKey;
 import com.cleanroommc.modularui.drawable.Rectangle;
@@ -13,9 +10,7 @@ import com.sbancuz.plannh.data.flowchart.Summary;
 import com.sbancuz.plannh.gui.PlannhColors;
 
 /** A machine pool's heading: its name, then how many channels, machines and input blocks it needs. */
-final class ChannelMachineRow extends SummaryFlow {
-
-    private static final int GAP = 3;
+final class ChannelMachineRow extends ChannelRow {
 
     ChannelMachineRow(final Summary.Line.ChannelMachine m) {
         super(GuiAxis.Y);
@@ -41,15 +36,15 @@ final class ChannelMachineRow extends SummaryFlow {
                     overCapacity ? PlannhColors.ACCENT_AMBER.getColor() : PlannhColors.SUMMARY_TEXT_MUTED.getColor()));
 
         tooltipStatic(t -> {
-            ChannelTip.title(t, name);
-            ChannelTip.body(t, ChannelTip.parts(m.parts()));
-            ChannelTip.body(t, tr("dedicated", m.dedicated()));
-            if (overCapacity) ChannelTip.warn(t, tr("capacity", m.machines(), m.capacity()));
-            if (!m.channelsMinimal()) ChannelTip.warn(t, tr("budget.channels"));
-            else if (!m.blocksMinimal()) ChannelTip.warn(t, tr("budget.blocks"));
-            ChannelTip.gap(t);
-            ChannelTip.heading(t, tr(ChannelTip.layout(m.mode())));
-            ChannelTip.body(t, tr(ChannelTip.layout(m.mode()) + ".help"));
+            title(t, name);
+            body(t, parts(m.parts()));
+            body(t, tr("dedicated", m.dedicated()));
+            if (overCapacity) warn(t, tr("capacity", m.machines(), m.capacity()));
+            if (!m.channelsMinimal()) warn(t, tr("budget.channels"));
+            else if (!m.blocksMinimal()) warn(t, tr("budget.blocks"));
+            gap(t);
+            heading(t, tr(layout(m.mode())));
+            body(t, tr(layout(m.mode()) + ".help"));
         });
     }
 
