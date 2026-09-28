@@ -51,7 +51,7 @@ public class GTProvider implements PropertyProvider {
     private static final int FURNACE_COOK_TICKS = 200;
 
     /** GT5u stores a chance as 1..10000, where 10000 is 100%. */
-    private static final float GT_CHANCE_SCALE = 10_000f;
+    static final float GT_CHANCE_SCALE = 10_000f;
 
     public static final RecipeProperty<Integer> SPECIAL_VALUE = RecipeProperty.<Integer>builder("gt.special_value", 0)
         .build();
@@ -78,6 +78,10 @@ public class GTProvider implements PropertyProvider {
 
     public static final RecipeProperty<RecipeMap<?>> RECIPE_MAP = RecipeProperty
         .<RecipeMap<?>>builder("gt.recipe_map", null)
+        .build();
+
+    /** The GT recipe itself, for analyses that need GT's own matcher. */
+    public static final RecipeProperty<GTRecipe> GT_RECIPE = RecipeProperty.<GTRecipe>builder("gt.recipe", null)
         .build();
 
     @Override
@@ -305,6 +309,7 @@ public class GTProvider implements PropertyProvider {
 
         if (gthMap != null) {
             props.put(RECIPE_MAP, gthMap);
+            props.put(GT_RECIPE, r);
         }
 
         extractMD(props, r, FUSION_THRESHOLD, GTRecipeConstants.FUSION_THRESHOLD, 0L);
