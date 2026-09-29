@@ -25,19 +25,14 @@ class SummarySection extends ParentWidget<SummarySection> {
         fullWidth().coverChildrenHeight()
             .setEnabledIf(_ -> data.lineCount(section) > 0);
 
-        final SummaryFlow col = SummaryFlow.col();
-        col.fullWidth()
-            .coverChildrenHeight()
-            .childPadding(INNER_GAP)
-            .collapseDisabledChild()
-            .child(new SummaryHeader(panel, data, section, sectionsList));
-        if (section == Summary.Section.CHANNELS) {
-            col.child(
-                ChannelRows.controls(data)
-                    .setEnabledIf(_ -> !data.isSummaryFold(section)));
-        }
-        col.child(new SummaryBody(panel, data, section).setEnabledIf(_ -> !data.isSummaryFold(section)));
-        child(col);
+        child(
+            SummaryFlow.col()
+                .fullWidth()
+                .coverChildrenHeight()
+                .childPadding(INNER_GAP)
+                .collapseDisabledChild()
+                .child(new SummaryHeader(panel, data, section, sectionsList))
+                .child(new SummaryBody(panel, data, section).setEnabledIf(_ -> !data.isSummaryFold(section))));
     }
 
     Summary.Section section() {
